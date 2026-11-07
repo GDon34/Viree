@@ -1,12 +1,10 @@
-// Cartes Leaflet (fonds CARTO sur données OpenStreetMap).
+// Cartes Leaflet (fonds OpenStreetMap).
 /* global L */
 import { destination } from './geo.js';
 
-const TILES = {
-  day: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-  night: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-};
-const ATTRIB = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/attributions">CARTO</a>';
+// Fonds OpenStreetMap standard (sans clé). Le thème nuit est obtenu par un filtre CSS.
+const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const ATTRIB = '© <a href="https://www.openstreetmap.org/copyright">contributeurs OpenStreetMap</a>';
 
 export function createMap(el, { rotate = false, theme = 'day', interactive = true } = {}) {
   const opts = {
@@ -24,13 +22,14 @@ export function createMap(el, { rotate = false, theme = 'day', interactive = tru
   if (rotate) Object.assign(opts, { rotate: true, touchRotate: false, shiftKeyRotate: false, pitchDrag: false, bearing: 0 });
   const map = L.map(el, opts);
   map.attributionControl.setPrefix(false);
-  map._tiles = L.tileLayer(TILES[theme] || TILES.day, { maxZoom: 19, subdomains: 'abcd', attribution: ATTRIB, crossOrigin: true }).addTo(map);
+  map._tiles = L.tileLayer(TILE_URL, { maxZoom: 19, attribution: ATTRIB, crossOrigin: true }).addTo(map);
+  setTheme(map, theme);
   return map;
 }
 
 export function setTheme(map, theme) {
-  if (!map || !map._tiles) return;
-  map._tiles.setUrl(TILES[theme] || TILES.day);
+  if (!map) return;
+  map.getContainer().classList.toggle('map-night', theme === 'night');
 }
 
 export function routeLayer(r, { color = '#C2410C', weight = 5, casing = '#FFFFFF', opacity = 1 } = {}) {

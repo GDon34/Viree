@@ -33,7 +33,7 @@ function pick(list, rand, used) {
   return src[Math.floor(rand() * src.length)];
 }
 
-function nameFor(c, mode, rand, used) {
+function nameCandidates(c, mode, rand, used) {
   const m = c.metrics;
   const pass = m.sights.filter((s) => s.kind === 'pass' && s.name).sort((a, b) => (b.ele || 0) - (a.ele || 0))[0];
   const lakes = m.lakes.filter((s) => s.name);
@@ -55,29 +55,26 @@ function nameFor(c, mode, rand, used) {
     else if (m.curvRating <= 2) options.push(...CALM, ...WHIMSY);
     else options.push(...WHIMSY);
   }
-  return pick(options, rand, used);
+  return options;
 }
 
-export function nameRoutes(chosen, mode, ctx, rand) {
-  const used = new Set();
-  for (const c of chosen) {
-    let n = nameFor(c, mode, rand, used);
-    if (used.has(n)) n = pick(mode === 'ab' ? AB_CALM.concat(WHIMSY) : WHIMSY, rand, used);
-    used.add(n);
-    c.name = n;
-  }
-  // Un badge par parcours, chacun distinct.
-  const badges = [];
-  const by = (f) => chosen.slice().sort((a, b) => f(b) - f(a));
-  const assign = (c, label, tone) => { if (c && !c.badge) { c.badge = { label, tone }; badges.push(label); } };
-  if (chosen.length > 1) {
-    const ref = chosen.find((c) => c.isReference);
-    if (ref) assign(ref, 'Le plus rapide', 'neutral');
-    assign(by((c) => c.metrics.degPerKm).find((c) => !c.badge && c.metrics.curvRating >= 3), 'Le plus sinueux', 'accent');
-    assign(by((c) => c.metrics.panoramaScore).find((c) => !c.badge && c.metrics.panoramaScore > 0), 'Le plus panoramique', 'scenic');
-    assign(chosen.find((c) => !c.badge && c.metrics.lakes.length >= 2), 'Au bord de l\'eau', 'scenic');
-    assign(by((c) => -c.metrics.degPerKm - c.metrics.manDensity * 5).find((c) => !c.badge), 'Le plus tranquille', 'neutral');
-  }
-  // Le meilleur score en premier.
-  chosen.sort((a, b) => b.score - a.score);
+export function nameFor(c, mode, rand, used = new Set()) {
+  let n = pick(nameCandidates(c, mode, rand, used), rand, used);
+  if (used.has(n)) n = pick(mode === 'ab' ? AB_CALM.concat(WHIMSY) : WHIMSY.concat(CALM), rand, used);
+  if (used.has(n)) { let k = 2; while (used.has(n + ' ' + k)) k++; n = n + ' ' + k; }
+  return n;
+}
+
+// Un badge par parcours, chacun distinct.
+export function assignBadges(list) {
+  for (const c of list) c.badge = null;
+  if (list.length < 2) return;
+  const by = (f) => list.slice().sort((a, b) => f(b) - f(a));
+  const assign = (c, label, tone) => { if (c && !c.badge) c.badge = { label, tone }; };
+  const ref = list.find((c) => c.isReference);
+  if (ref) assign(ref, 'Le plus rapide', 'neutral');
+  assign(by((c) => c.metrics.degPerKm).find((c) => !c.badge && c.metrics.curvRating >= 3), 'Le plus sinueux', 'accent');
+  assign(by((c) => c.metrics.panoramaScore).find((c) => !c.badge && c.metrics.panoramaScore > 0), 'Le plus panoramique', 'scenic');
+  assign(list.find((c) => !c.badge && c.metrics.lakes.length >= 2), 'Au bord de l\'eau', 'scenic');
+  assign(by((c) => -c.metrics.degPerKm - c.metrics.manDensity * 5).find((c) => !c.badge), 'Le plus tranquille', 'neutral');
 }

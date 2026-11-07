@@ -313,8 +313,10 @@ export function installMock(target = globalThis, { seed = 42, latency = 60, log 
       stats.overpass++;
       await wait();
       const body = decodeURIComponent(String(init.body || '').replace(/^data=/, ''));
-      if (body.includes('mountain_pass')) return json({ elements: world.interest });
-      if (body.includes('amenity')) return json({ elements: world.stopsPois });
+      // Comme le vrai Overpass : « out tags » ne renvoie pas les coordonnées des nœuds.
+      const strip = (els) => (/out\s+tags/.test(body) ? els.map(({ lat, lon, ...rest }) => rest) : els);
+      if (body.includes('mountain_pass')) return json({ elements: strip(world.interest) });
+      if (body.includes('amenity')) return json({ elements: strip(world.stopsPois) });
       return json({ elements: [] });
     }
     if (url.startsWith('https://photon.komoot.io')) {

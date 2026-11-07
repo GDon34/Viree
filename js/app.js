@@ -1,7 +1,12 @@
 // Virée — application (écrans, saisie, recherche, navigation).
 /* global L */
 import { loadSettings, saveSettings } from './settings.js';
-import { planRoutes, routeWithStops, analyzeRoute, abTargetMinutes } from './planner.js';
+import { PlanSession, routeWithStops, analyzeRoute, abTargetMinutes, featureVector } from './planner.js';
+import {
+  saveRide, listRides, deleteRide, rateRide, rideRecord, rideTrack, unpackOption,
+  saveLiked, deleteLiked, listLiked, loadPrefs, resetPrefs, loadVotes, clearVotes, learn, recordVote,
+  exclusionSets, TASTES,
+} from './store.js';
 import { route as fetchRoute, searchPlaces, AbortedError, setRateGap, timeAt } from './services.js';
 import { createMap, setTheme, routeLayer, markerIcon, stopMarker, meIcon, aheadCenter, thumbSvg } from './map.js';
 import { NavEngine } from './navigator.js';
@@ -36,7 +41,7 @@ const S = {
 function show(id, { push = true } = {}) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === id));
   if (push && S.history[S.history.length - 1] !== id) S.history.push(id);
-  const m = { 'screen-search': 'search', 'screen-detail': 'detail', 'screen-nav': 'nav', 'screen-end': 'end' }[id];
+  const m = { 'screen-detail': 'detail', 'screen-nav': 'nav', 'screen-end': 'end', 'screen-rides': 'rides' }[id];
   if (m && S.maps[m]) setTimeout(() => S.maps[m].invalidateSize(), 50);
   window.scrollTo(0, 0);
 }
@@ -47,9 +52,15 @@ function back() {
 }
 
 let toastTimer;
-function toast(msg, ms = 3500) {
+function toast(msg, ms = 3500, action = null) {
   const t = $('#toast');
-  t.textContent = msg;
+  $('#toast-text').textContent = msg;
+  const btn = $('#toast-action');
+  if (action) {
+    btn.hidden = false;
+    btn.textContent = action.label;
+    btn.onclick = () => { t.hidden = true; action.fn(); };
+  } else btn.hidden = true;
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.hidden = true; }, ms);
@@ -60,6 +71,22 @@ function toast(msg, ms = 3500) {
 let gpsWatch = null;
 const gpsListeners = new Set();
 
+function onGpsFix(p) {
+  const fix = { pos: [p.coords.latitude, p.coords.longitude], accuracy: p.coords.accuracy, speed: p.coords.speed, heading: p.coords.heading, t: p.timestamp || Date.now() };
+  // On garde la meilleure position récente (la première, approximative, est vite remplacée).
+  if (!S.gps || fix.accuracy <= S.gps.accuracy * 1.5 || fix.t - S.gps.t > 15000) S.gps = fix;
+  S.gpsError = null;
+  updateGpsChip();
+  if (!S.fast && S.settings.mode === 'ab' && S.end && !S.start.point) refreshFast();
+  for (const f of gpsListeners) f(p);
+}
+
+function onGpsError(err) {
+  if (err.code === 1) S.gpsError = 'denied';
+  else if (!S.gps) S.gpsError = 'unavailable';
+  updateGpsChip();
+}
+
 function startGps(force = false) {
   if (MOCK && !force) {
     const w = window.__mockWorld;
@@ -67,28 +94,52 @@ function startGps(force = false) {
     updateGpsChip();
     return;
   }
-  if (!('geolocation' in navigator)) { S.gpsError = 'GPS indisponible'; updateGpsChip(); return; }
+  if (!('geolocation' in navigator)) { S.gpsError = 'unsupported'; updateGpsChip(); return; }
+  // Position approximative rapide (réseau), puis suivi précis par le GPS.
+  navigator.geolocation.getCurrentPosition(onGpsFix, onGpsError, { enableHighAccuracy: false, maximumAge: 600000, timeout: 15000 });
   if (gpsWatch != null) return;
-  gpsWatch = navigator.geolocation.watchPosition((p) => {
-    S.gps = { pos: [p.coords.latitude, p.coords.longitude], accuracy: p.coords.accuracy, speed: p.coords.speed, heading: p.coords.heading, t: p.timestamp };
-    S.gpsError = null;
-    updateGpsChip();
-    if (!S.fast && S.settings.mode === 'ab' && S.end && !S.start.point) refreshFast();
-    for (const f of gpsListeners) f(p);
-  }, (err) => {
-    S.gpsError = err.code === 1 ? 'Accès à la position refusé' : 'Position introuvable';
-    updateGpsChip();
-  }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 30000 });
+  gpsWatch = navigator.geolocation.watchPosition(onGpsFix, onGpsError, { enableHighAccuracy: true, maximumAge: 2000, timeout: 60000 });
 }
+
+function restartGps() {
+  if (gpsWatch != null) { navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; }
+  S.gpsError = null;
+  updateGpsChip();
+  startGps();
+}
+
+// Attend une position (au plus `ms` millisecondes).
+function waitForGps(ms) {
+  if (S.gps) return Promise.resolve(S.gps.pos);
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (S.gps || S.gpsError === 'denied' || Date.now() - t0 > ms) { clearInterval(iv); resolve(S.gps ? S.gps.pos : null); }
+    }, 250);
+  });
+}
+
+const GPS_HELP = 'Position refusée. Dans Chrome : touche l\'icône à gauche de l\'adresse → Autorisations → Position → Autoriser. Vérifie aussi que la localisation du téléphone est activée.';
 
 function updateGpsChip() {
   const chip = $('#gps-chip');
+  if (!chip) return;
   if (!S.start.gps) { chip.hidden = true; return; }
   chip.hidden = false;
-  const ok = S.gps && S.gps.accuracy < 150;
-  chip.classList.toggle('bad', !ok);
-  chip.lastChild.textContent = S.gpsError ? 'GPS ?' : ok ? 'GPS' : 'GPS…';
-  chip.title = S.gpsError || (S.gps ? `Précision ${Math.round(S.gps.accuracy)} m` : 'Recherche du signal');
+  chip.classList.remove('ok', 'approx', 'bad');
+  const label = chip.querySelector('span');
+  if (S.gpsError === 'denied' || S.gpsError === 'unsupported') {
+    chip.classList.add('bad'); label.textContent = 'GPS refusé';
+  } else if (S.gps && S.gps.accuracy <= 300) {
+    chip.classList.add('ok'); label.textContent = 'GPS';
+  } else if (S.gps) {
+    chip.classList.add('approx'); label.textContent = 'GPS ±' + (S.gps.accuracy >= 1000 ? (S.gps.accuracy / 1000).toFixed(1).replace('.', ',') + ' km' : Math.round(S.gps.accuracy) + ' m');
+  } else if (S.gpsError === 'unavailable') {
+    chip.classList.add('bad'); label.textContent = 'GPS introuvable';
+  } else {
+    label.textContent = 'GPS…';
+  }
+  chip.title = S.gps ? `Précision ${Math.round(S.gps.accuracy)} m` : 'Recherche de la position';
 }
 
 function startPoint() {
@@ -105,7 +156,7 @@ function setMode(mode) {
   $('#mode-ab').setAttribute('aria-pressed', String(mode === 'ab'));
   $$('.loop-only').forEach((el) => { el.hidden = mode !== 'loop'; });
   $$('.ab-only').forEach((el) => { el.hidden = mode !== 'ab'; });
-  $('#places-label').textContent = mode === 'loop' ? 'Départ et arrivée' : 'Itinéraire';
+  $('#places-label').textContent = mode === 'loop' ? 'Départ et retour' : 'Itinéraire';
   renderHome();
   if (mode === 'ab') refreshFast();
 }
@@ -185,17 +236,20 @@ function bindStepper() {
 function bindPlace(row, which) {
   const input = row.querySelector('input');
   const box = row.querySelector('.suggest');
+  const clear = row.querySelector('.clear');
   let timer = null, ctrl = null, items = [];
   const close = () => { box.hidden = true; };
-  const render = () => {
+  const render = (typed = false) => {
     const list = [];
-    if (which === 'start') list.push({ gps: true, label: 'Ma position actuelle', sub: S.gps ? 'GPS' : 'en attente du GPS' });
+    if (which === 'start') list.push({ gps: true, label: 'Ma position actuelle', sub: S.gps ? 'GPS, précision ' + Math.round(S.gps.accuracy) + ' m' : 'en attente du GPS' });
+    if (!typed) list.push(...recentPlaces().map((r) => ({ ...r, sub: 'Récent' + (r.sub ? ' · ' + r.sub : '') })));
     list.push(...items);
     box.innerHTML = list.map((it, i) => `<button type="button" data-i="${i}"><b>${escapeHtml(it.label)}</b>${it.sub ? `<span>${escapeHtml(it.sub)}</span>` : ''}</button>`).join('');
     box.hidden = list.length === 0;
     box.querySelectorAll('button').forEach((b) => b.addEventListener('mousedown', (ev) => ev.preventDefault()));
     box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       const it = list[+b.dataset.i];
+      if (!it.gps && !it.point) return;
       if (which === 'start') {
         S.start = it.gps ? { gps: true, label: 'Ma position actuelle', point: null } : { gps: false, label: it.label, point: it.point };
         input.value = S.start.label;
@@ -204,25 +258,41 @@ function bindPlace(row, which) {
         S.end = { label: it.label, point: it.point };
         input.value = it.label;
       }
+      if (!it.gps) rememberPlace({ label: it.label, sub: (it.sub || '').replace(/^Récent( · )?/, ''), point: it.point });
+      if (clear) clear.hidden = (which === 'start' && S.start.gps) || !input.value;
       close();
       input.blur();
       refreshFast();
     }));
   };
-  input.addEventListener('focus', () => { input.select(); items = []; render(); });
-  input.addEventListener('blur', () => setTimeout(close, 150));
+  input.addEventListener('focus', () => {
+    // Avec « Ma position actuelle », on vide le champ pour pouvoir taper directement une adresse.
+    if (which === 'start' && S.start.gps) input.value = '';
+    else input.select();
+    items = []; render();
+  });
+  input.addEventListener('blur', () => setTimeout(() => {
+    close();
+    if (which === 'start' && !input.value.trim()) input.value = S.start.label;
+  }, 150));
+  clear?.addEventListener('click', () => {
+    if (which === 'start') { S.start = { gps: true, label: 'Ma position actuelle', point: null }; input.value = S.start.label; updateGpsChip(); }
+    else { S.end = null; input.value = ''; S.fast = null; renderHome(); }
+    clear.hidden = true;
+  });
   input.addEventListener('input', () => {
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 3) { items = []; render(); return; }
+    if (q.length < 3) { items = []; render(q.length > 0); return; }
     timer = setTimeout(async () => {
       ctrl?.abort();
       ctrl = new AbortController();
       try {
         items = await searchPlaces(q, startPoint() || S.gps?.pos, { signal: ctrl.signal });
-        render();
+        if (!items.length) items = [{ label: 'Aucun résultat', sub: 'essaie avec le nom de la ville', point: null }];
+        render(true);
       } catch (e) {
-        if (e.name !== 'AbortError') { items = [{ label: 'Recherche indisponible', sub: e.message, point: null }]; render(); }
+        if (e.name !== 'AbortError') { items = [{ label: 'Recherche d\'adresse indisponible', sub: 'vérifie le réseau', point: null }]; render(true); }
       }
     }, 350);
   });
@@ -272,33 +342,23 @@ function bindSettings() {
 
 // --- Recherche (écran 2a) ----------------------------------------------------
 
-const STEP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" style="color:#fff"><use href="#i-check"/></svg>';
-
-function renderSteps(st) {
-  const rows = [];
-  if (st.mode === 'ab') rows.push({ key: 'ref', txt: 'Trajet le plus rapide', val: st.fastS ? fmtDuration(st.fastS / 60) : '' });
-  rows.push({ key: 'poi', txt: 'Cols, belvédères et lacs repérés', val: st.poiCount != null ? String(st.poiCount) : '' });
-  rows.push({ key: 'cand', txt: 'Calcul des parcours', val: st.total ? `${st.done} sur ${st.total}` : '', bar: st.total ? st.done / st.total : 0 });
-  rows.push({ key: 'stops', txt: 'Pauses et plein d\'essence', val: '' });
-  rows.push({ key: 'select', txt: 'Choix des meilleurs parcours', val: '' });
-  const order = rows.map((r) => r.key);
-  const cur = order.indexOf(st.phase);
-  $('#search-steps').innerHTML = rows.map((r, i) => {
-    const cls = i < cur ? 'done' : i === cur ? 'active' : 'todo';
-    return `<li class="${cls}"><div class="line"><span class="dot">${cls === 'done' ? STEP_ICON : ''}</span><span class="txt">${r.txt}</span><span class="val">${escapeHtml(r.val)}</span></div>${r.key === 'cand' && cls === 'active' ? `<div class="bar"><i style="width:${Math.round(r.bar * 100)}%"></i></div>` : ''}</li>`;
-  }).join('');
-}
-
-const CAND_COLORS = ['#C2410C', '#0B6E6E', '#15181B', '#9A3412', '#0A5C5C', '#5B6168'];
+const CURRENT = { session: null };
 
 async function startSearch() {
   const s = S.settings;
-  const start = startPoint();
+  let start = startPoint();
+  if (!start && S.start.gps) {
+    if (S.gpsError === 'denied') { toast(GPS_HELP, 9000); return; }
+    toast('Recherche de ta position…', 12000);
+    start = await waitForGps(12000);
+    $('#toast').hidden = true;
+  }
   if (!start) {
-    toast(S.gpsError ? S.gpsError + ' : choisis un départ dans la liste' : 'En attente du GPS… réessaie dans un instant');
+    toast('Position introuvable : choisis un point de départ dans la liste (tape une ville ou une adresse)', 7000);
     return;
   }
   if (s.mode === 'ab' && !S.end) { toast('Choisis une arrivée'); $('#end-input').focus(); return; }
+  if (s.mode === 'ab' && haversine(start, S.end.point) < 1000) { toast('Départ et arrivée sont au même endroit : choisis plutôt « Boucle »', 5000); return; }
   s.fuelKm = Math.max(0, parseFloat($('#fuel').value) || 0);
   saveSettings(s);
 
@@ -314,99 +374,220 @@ async function startSearch() {
     settings: JSON.parse(JSON.stringify(s)),
     departure: new Date(),
   };
-  S.plan = { params: p, controller: new AbortController(), control: { stopEarly: false }, st: { mode: p.mode, phase: p.mode === 'ab' ? 'ref' : 'poi', done: 0, total: 0, found: 0 } };
-  $('#search-sub').textContent = p.mode === 'loop'
-    ? `Boucle · ${fmtDuration(p.durationMin)} de roulage · découverte ${s.discovery} %`
-    : `Vers ${S.end.label} · découverte ${s.discovery} %`;
-  $('#search-error').hidden = true;
-  $('#search-error-actions').hidden = true;
-  $('#search-note').hidden = false;
-  const early = $('#search-early');
-  early.hidden = false; early.disabled = true; early.textContent = 'Voir les parcours trouvés';
-  renderSteps(S.plan.st);
-  show('screen-search');
+  CURRENT.session?.cancel();
+  S.plan = { params: p };
+  $('#list-sub').textContent = (p.mode === 'loop'
+    ? `Boucle · ${fmtDuration(p.durationMin)} de roulage`
+    : `Vers ${S.end.label}`) + ` · découverte ${s.discovery} % · ${p.fuelKm} km d'autonomie`;
+  $('#route-list').innerHTML = '<div class="empty-card" id="list-placeholder">Les premiers parcours arrivent…</div>';
+  $('#list-msg').hidden = true;
+  $('#list-error-actions').hidden = true;
+  $('#list-more').hidden = true;
+  setProgress(true, 'Préparation…', 0.03, '');
+  S.history = ['screen-home', 'screen-list'];
+  show('screen-list', { push: false });
 
-  if (!S.maps.search) S.maps.search = createMap('search-map', { interactive: false });
-  const map = S.maps.search;
-  if (S.searchLayer) S.searchLayer.remove();
-  S.searchLayer = L.layerGroup().addTo(map);
-  L.marker(start, { icon: markerIcon('start', 'start'), keyboard: false }).addTo(S.searchLayer);
-  if (p.end) L.marker(p.end, { icon: markerIcon('end', 'start'), keyboard: false }).addTo(S.searchLayer);
-  map.setView(start, p.mode === 'loop' ? 10 : 9);
-  if (p.end) map.fitBounds([start, p.end], { padding: [40, 40] });
-  setTimeout(() => map.invalidateSize(), 60);
-
-  const plan = S.plan;
-  let drawn = 0;
+  let exclusions = [];
+  try { exclusions = await exclusionSets(); } catch { /* mémoire indisponible */ }
+  const session = new PlanSession(p, searchHooks(), { exclusions, prefs: loadPrefs() });
+  CURRENT.session = session;
+  S.plan.session = session;
+  session.budget = 24;
   try {
-    const res = await planRoutes(p, {
-      signal: plan.controller.signal,
-      control: plan.control,
-      onProgress: (e) => {
-        const st = plan.st;
-        if (e.phase === 'reference-done') { st.fastS = e.fastS; st.phase = 'poi'; S.fast = { key: 'x', timeS: e.fastS, lengthKm: e.route.lengthKm }; }
-        if (e.phase === 'poi-done') { st.poiCount = e.count; st.phase = 'cand'; }
-        if (e.phase === 'candidates') { st.phase = 'cand'; st.total = e.total; st.done = e.done; }
-        if (e.phase === 'candidate') {
-          st.done = e.done; st.total = e.total; st.found = e.found;
-          const layer = routeLayer(e.route, { color: CAND_COLORS[drawn++ % CAND_COLORS.length], weight: 3, casing: null, opacity: 0.75 });
-          layer.addTo(S.searchLayer);
-          if (drawn === 1) map.fitBounds(L.latLngBounds(e.route.shape), { padding: [20, 20] });
-          if (e.found >= 2) early.disabled = false;
-        }
-        if (e.phase === 'stops') st.phase = 'stops';
-        if (e.phase === 'select') st.phase = st.phase === 'stops' ? 'stops' : 'select';
-        if (e.phase === 'done') st.phase = 'done';
-        renderSteps(st);
-      },
-    });
-    if (S.plan !== plan) return;
-    S.result = res;
-    renderList();
-    show('screen-list');
+    await session.start();
   } catch (e) {
-    if (e instanceof AbortedError || S.plan !== plan) return;
-    $('#search-error').textContent = e.message || 'Erreur inattendue';
-    $('#search-error').hidden = false;
-    $('#search-error-actions').hidden = false;
-    $('#search-note').hidden = true;
-    early.hidden = true;
+    if (!(e instanceof AbortedError) && CURRENT.session === session) showSearchError(e);
   }
 }
 
-// --- Liste (écran 2b) --------------------------------------------------------
+function setProgress(on, text, frac, meta) {
+  const box = $('#list-progress');
+  box.hidden = !on;
+  if (!on) return;
+  if (text != null) {
+    const t = $('#ticker');
+    if (t.textContent !== text) {
+      t.textContent = text;
+      t.style.animation = 'none'; void t.offsetWidth; t.style.animation = '';
+    }
+  }
+  if (frac != null) $('#list-bar').style.width = Math.max(3, Math.min(100, frac * 100)) + '%';
+  if (meta != null) $('#list-meta').textContent = meta;
+}
+
+function searchHooks() {
+  const mine = () => CURRENT.session && CURRENT.session.hooks === hooks;
+  const hooks = {
+    onStep: (t) => { if (mine()) setProgress(true, t, null, null); },
+    onRoute: (o) => {
+      if (!mine()) return;
+      $('#list-placeholder')?.remove();
+      $('#route-list').insertAdjacentHTML('beforeend', cardHtml(o));
+      bindCard(o);
+    },
+    onUpdate: (o) => { if (mine()) refreshCard(o); },
+    onProgress: ({ computed, budget, shown }) => {
+      if (!mine()) return;
+      setProgress(true, null, computed / budget, `${shown} parcours trouvé${shown > 1 ? 's' : ''} · ${computed} calculé${computed > 1 ? 's' : ''} sur ${budget}`);
+    },
+    onDone: (info) => { if (mine()) searchDone(info); },
+    onError: (e) => { if (mine()) showSearchError(e); },
+  };
+  return hooks;
+}
+
+function showSearchError(e) {
+  setProgress(false);
+  $('#list-placeholder')?.remove();
+  const msg = $('#list-msg');
+  msg.textContent = e.message || 'Erreur inattendue';
+  msg.hidden = false;
+  $('#list-error-actions').hidden = false;
+  $('#list-more').hidden = !(CURRENT.session && CURRENT.session.options.length);
+}
+
+function searchDone(info) {
+  const session = CURRENT.session;
+  setProgress(false);
+  $('#list-placeholder')?.remove();
+  // Mise à jour des badges et du « meilleur choix ».
+  for (const o of session.shown) refreshCard(o);
+  const st = info.stats;
+  const msg = $('#list-msg');
+  msg.hidden = true;
+  if (info.added === 0) {
+    const alreadyDone = st.rejectedRide + st.rejectedDown;
+    msg.hidden = false;
+    if (session.options.length === 0 && alreadyDone > 0) {
+      msg.textContent = `Tu as déjà roulé (ou écarté) tous les parcours trouvés avec ces réglages : ${alreadyDone} écarté${alreadyDone > 1 ? 's' : ''}. Augmente un peu la durée ou le degré de découverte pour en découvrir de nouveaux. Tes trajets déjà faits sont dans « Mes sorties ».`;
+    } else if (session.options.length === 0) {
+      msg.textContent = 'Aucun parcours trouvé avec ces réglages. Essaie une autre durée ou un autre point de départ.';
+    } else if (alreadyDone > 0) {
+      msg.textContent = `Plus de nouveaux parcours ici : ${alreadyDone} déjà faits ou écartés. Augmente un peu la durée pour aller plus loin.`;
+    } else {
+      msg.textContent = 'Plus de nouveaux parcours différents avec ces réglages.';
+    }
+  }
+  $('#list-more').hidden = session.options.length === 0 || (info.added === 0 && !session.reference) || (session.reference && session.d === 0);
+  $('#list-more').disabled = false;
+  $('#list-more').textContent = 'Charger d\'autres parcours';
+}
+
+async function loadMore() {
+  const session = CURRENT.session;
+  if (!session || session.running) return;
+  $('#list-more').hidden = true;
+  $('#list-msg').hidden = true;
+  setProgress(true, 'Recherche d\'autres parcours…', 0.03, '');
+  await session.more();
+}
 
 function dotsHtml(n) {
   return `<span class="dots">${[1, 2, 3, 4, 5].map((i) => `<i class="${i <= n ? 'on' : ''}"></i>`).join('')}</span>`;
 }
 
-function renderList() {
-  const p = S.plan.params;
-  $('#list-sub').textContent = (p.mode === 'loop'
-    ? `Boucle · ${fmtDuration(p.durationMin)} de roulage`
-    : `Vers ${S.end.label}`) + ` · découverte ${Math.round(p.discovery * 100)} % · ${p.fuelKm} km d'autonomie`;
-  const html = S.result.options.map((o, i) => {
-    const m = o.metrics;
-    const pauses = o.stops.length;
-    const fuel = o.stops.filter((s) => s.kind === 'fuel').length;
-    return `<button type="button" class="route-card ${i === 0 ? 'best' : ''}" data-i="${i}">
-      ${thumbSvg(o.route.shape, o.start)}
+function cardBody(o) {
+  const m = o.metrics;
+  const pauses = o.stops.length;
+  const fuel = o.stops.filter((s) => s.kind === 'fuel').length;
+  const pauseInfo = o.stopsReady
+    ? `<span class="indic" role="img" aria-label="${pauses} pauses dont ${fuel} plein"><svg aria-hidden="true"><use href="#i-cup"/></svg>${pauses}${fuel ? ' · ' + fuel + ' plein' : ''}</span>`
+    : '<span class="pending-line">pauses en cours…</span>';
+  return `${thumbSvg(o.route.shape, o.start)}
       <span class="body">
+        ${o.best ? '<span class="best-flag">Notre préféré</span>' : ''}
         ${o.badge ? `<span class="badge ${o.badge.tone}">${escapeHtml(o.badge.label)}</span>` : ''}
         <span class="route-name">${escapeHtml(o.name)}</span>
         <span class="route-dur">${fmtDuration(o.route.timeS / 60)} · ${Math.round(o.route.totalM / 1000)} km</span>
         <span class="indics">
           <span class="indic" role="img" aria-label="Virages : ${m.curvRating} sur 5"><svg aria-hidden="true" style="color:var(--accent)"><use href="#i-logo"/></svg>${dotsHtml(m.curvRating)}</span>
           <span class="indic" role="img" aria-label="${m.panoramaCount} panoramas"><svg aria-hidden="true" style="color:var(--teal)"><use href="#i-mountain"/></svg>${m.panoramaCount}</span>
-          <span class="indic" role="img" aria-label="${pauses} pauses dont ${fuel} plein"><svg aria-hidden="true"><use href="#i-cup"/></svg>${pauses}${fuel ? ' · ' + fuel + ' plein' : ''}</span>
+          ${pauseInfo}
         </span>
         ${o.fuelWarning ? `<span class="warn-line">${escapeHtml(o.fuelWarning.message)}</span>` : ''}
-      </span>
-    </button>`;
-  }).join('') + '<button type="button" class="btn-link" id="list-again">Changer les réglages et relancer</button>';
-  $('#route-list').innerHTML = html;
-  $$('#route-list .route-card').forEach((b) => b.addEventListener('click', () => openDetail(S.result.options[+b.dataset.i])));
-  $('#list-again').addEventListener('click', () => { S.history = ['screen-home']; show('screen-home', { push: false }); });
+      </span>`;
+}
+
+function cardHtml(o) {
+  return `<article class="route-card ${o.best ? 'best' : ''}" id="card-${o.id}">
+    <button type="button" class="card-main" aria-label="Voir ${escapeHtml(o.name)}">${cardBody(o)}</button>
+    <div class="votes">
+      <button type="button" class="vote up" aria-pressed="${!!o.liked}" aria-label="J'aime ce parcours"><svg aria-hidden="true"><use href="#i-up"/></svg></button>
+      <button type="button" class="vote down" aria-label="Pas pour moi : retirer ce parcours"><svg aria-hidden="true"><use href="#i-down"/></svg></button>
+    </div>
+  </article>`;
+}
+
+function bindCard(o) {
+  const el = document.getElementById('card-' + o.id);
+  if (!el) return;
+  el.querySelector('.card-main').addEventListener('click', () => openDetail(o));
+  el.querySelector('.vote.up').addEventListener('click', () => toggleLike(o));
+  el.querySelector('.vote.down').addEventListener('click', () => dislike(o));
+}
+
+function refreshCard(o) {
+  const el = document.getElementById('card-' + o.id);
+  if (!el) return;
+  if (o.removed) { el.remove(); return; }
+  el.classList.toggle('best', !!o.best);
+  el.querySelector('.card-main').innerHTML = cardBody(o);
+  el.querySelector('.vote.up').setAttribute('aria-pressed', String(!!o.liked));
+}
+
+// --- Votes ---------------------------------------------------------------------
+
+function refFeatures() {
+  const opts = CURRENT.session ? CURRENT.session.options : [];
+  if (opts.length < 2) return null;
+  const ref = {};
+  for (const { key } of TASTES) ref[key] = opts.reduce((a, o) => a + (o.features?.[key] ?? 0.5), 0) / opts.length;
+  return ref;
+}
+
+async function toggleLike(o) {
+  o.features = o.features || featureVector(o.metrics);
+  if (!o.liked) {
+    o.liked = true;
+    learn(o.features, 1, refFeatures());
+    recordVote({ t: Date.now(), vote: 'up', name: o.name, km: Math.round(o.route.totalM / 1000), min: Math.round(o.route.timeS / 60), id: o.id });
+    try { await saveLiked(o.id, o); } catch { /* mémoire indisponible */ }
+    toast('Ajouté à tes parcours aimés (dans « Mes sorties »)', 2500);
+  } else {
+    o.liked = false;
+    learn(o.features, -1, refFeatures());
+    try { await deleteLiked(o.id); } catch { /* ignoré */ }
+    toast('Retiré de tes parcours aimés', 2000);
+  }
+  refreshCard(o);
+  if (S.option === o) $('#detail-like').setAttribute('aria-pressed', String(!!o.liked));
+}
+
+function dislike(o) {
+  o.features = o.features || featureVector(o.metrics);
+  const ref = refFeatures();
+  const el = document.getElementById('card-' + o.id);
+  learn(o.features, -1, ref);
+  const vote = { t: Date.now(), vote: 'down', name: o.name, km: Math.round(o.route.totalM / 1000), min: Math.round(o.route.timeS / 60), id: o.id, cells: [...(o.cells || [])] };
+  recordVote(vote);
+  if (o.liked) { o.liked = false; deleteLiked(o.id).catch(() => {}); }
+  CURRENT.session?.remove(o);
+  const finish = () => { el?.remove(); for (const x of CURRENT.session?.options || []) refreshCard(x); };
+  if (el) { el.classList.add('leaving'); setTimeout(finish, 260); } else finish();
+  toast(`« ${o.name} » retiré`, 6000, {
+    label: 'Annuler',
+    fn: () => {
+      learn(o.features, 1, ref);
+      const votes = loadVotes().filter((v) => !(v.id === o.id && v.vote === 'down'));
+      try { localStorage.setItem('viree.votes.v1', JSON.stringify(votes)); } catch { /* ignoré */ }
+      CURRENT.session?.restore(o);
+      if (!document.getElementById('card-' + o.id)) {
+        $('#route-list').insertAdjacentHTML('beforeend', cardHtml(o));
+        bindCard(o);
+      }
+      for (const x of CURRENT.session?.options || []) refreshCard(x);
+    },
+  });
 }
 
 // --- Détail (écran 2c) -------------------------------------------------------
@@ -429,9 +610,11 @@ function renderDetail() {
   $('#detail-sub').textContent = bits.join(' · ');
   $('#detail-warn').hidden = !o.fuelWarning;
   if (o.fuelWarning) $('#detail-warn').textContent = o.fuelWarning.message;
+  $('#detail-like').setAttribute('aria-pressed', String(!!o.liked));
+  $('#detail-votes').hidden = !!o.fromHistory;
 
   // Programme : départ, pauses, points de vue en passant, arrivée.
-  const items = [{ t: 0, html: `<span class="tl-ico"><svg aria-hidden="true" style="color:#fff"><use href="#i-flag"/></svg></span><span class="tl-txt"><b>Départ</b><span>${escapeHtml(o.mode === 'loop' || S.start.gps ? S.start.label : S.start.label)}</span></span>`, along: 0 }];
+  const items = [{ t: 0, html: `<span class="tl-ico"><svg aria-hidden="true" style="color:#fff"><use href="#i-flag"/></svg></span><span class="tl-txt"><b>Départ</b><span>${escapeHtml(o.startLabel || S.start.label)}</span></span>`, along: 0 }];
   for (const s of o.stops) {
     const cls = s.kind === 'fuel' ? 'accent' : 'teal';
     const icon = s.kind === 'fuel' ? 'i-fuel' : STOP_ICON[s.poiKind] || 'i-cup';
@@ -464,27 +647,41 @@ function renderDetail() {
   setTimeout(() => { map.invalidateSize(); map.fitBounds(L.latLngBounds(r.shape), { padding: [24, 24] }); }, 60);
 }
 
-async function openDetail(option) {
+async function openDetail(option, { fromHistory = false } = {}) {
   S.option = option;
+  option.fromHistory = fromHistory;
+  if (!option.startLabel) option.startLabel = S.start.gps ? 'Ma position actuelle' : S.start.label;
   show('screen-detail');
+  const go = $('#detail-go');
+  const upd = $('#detail-updating');
+  const busy = (on, text) => {
+    upd.hidden = !on; if (text) upd.textContent = text;
+    go.disabled = on; $('#detail-sim').disabled = on;
+  };
+  // Pauses pas encore calculées (parcours ouvert pendant la recherche).
+  if (!option.stopsReady && !fromHistory && CURRENT.session) {
+    renderDetail();
+    busy(true, 'Recherche des pauses et du plein…');
+    try { await CURRENT.session.ensureStops(option); } catch { /* sans pauses */ }
+    option.stopsReady = true;
+    refreshCard(option);
+  }
   renderDetail();
   // Recalcul en passant par les pauses, pour que le guidage y mène.
   if (option.stops.length && !option.withStops) {
-    const go = $('#detail-go');
-    const upd = $('#detail-updating');
-    upd.hidden = false; go.disabled = true; $('#detail-sim').disabled = true;
+    busy(true, 'Mise à jour du guidage vers les pauses…');
     try {
-      const r = await routeWithStops(option, S.plan.params.settings);
+      const r = await routeWithStops(option, S.settings);
       option.route = r;
-      option.metrics = { ...option.metrics, ...analyzeRoute(r, S.result.pois, option.mode), curvRating: option.metrics.curvRating };
+      const pois = CURRENT.session?.pois || [];
+      option.metrics = { ...option.metrics, ...analyzeRoute(r, pois, option.mode), curvRating: option.metrics.curvRating };
       option.withStops = true;
       if (S.option === option) renderDetail();
     } catch (e) {
       toast('Guidage vers les pauses indisponible, elles seront signalées en chemin');
-    } finally {
-      upd.hidden = true; go.disabled = false; $('#detail-sim').disabled = false;
     }
   }
+  busy(false);
 }
 
 // --- Navigation (écran 3) -----------------------------------------------------
@@ -557,7 +754,7 @@ function startNav({ simulate = false } = {}) {
   const theme = navTheme();
   const scr = $('#screen-nav');
   scr.classList.toggle('light', theme === 'day');
-  o.fuelKm = S.plan.params.fuelKm;
+  o.fuelKm = S.plan?.params?.fuelKm ?? S.settings.fuelKm;
   const nav = { follow: true, simulate, theme };
   S.nav = nav;
   const engine = new NavEngine(o, S.settings, {
@@ -570,6 +767,7 @@ function startNav({ simulate = false } = {}) {
     onArrive: (sum) => endNav(sum),
   });
   nav.engine = engine;
+  engine.simulated = simulate;
   $('#sim-badge').hidden = !simulate;
   $('#nav-voice').setAttribute('aria-pressed', String(!!S.settings.voice));
   hideSheet();
@@ -849,6 +1047,192 @@ function endNav(sum) {
   S.endLayer = g;
   setTimeout(() => { map.invalidateSize(); map.fitBounds(L.latLngBounds(sum.track.length > 1 ? sum.track.map((t) => [t[0], t[1]]) : o.route.shape), { padding: [16, 16] }); }, 60);
   S.nav = null;
+  // Enregistrement dans « Mes sorties » (sauf essai trop court).
+  S.lastRide = null;
+  renderStars($('#end-stars'), 0);
+  $('#end-rate-msg').textContent = 'Ta note aide l\'appli à mieux choisir tes prochaines virées.';
+  if (sum.odometerM >= 300 && sum.track.length > 1) {
+    const rec = rideRecord(sum, o);
+    rec.simulated = !!sum.simulated;
+    S.lastRide = rec;
+    saveRide(rec).catch(() => toast('Sortie non enregistrée (mémoire du téléphone indisponible)'));
+  } else {
+    $('#end-rate-msg').textContent = 'Sortie trop courte pour être enregistrée dans « Mes sorties ».';
+  }
+}
+
+// --- Note sur 5 étoiles ------------------------------------------------------------
+
+function renderStars(box, n) {
+  box.querySelectorAll('button').forEach((b) => {
+    const r = +b.dataset.r;
+    b.querySelector('use').setAttribute('href', r <= n ? '#i-star' : '#i-star-o');
+    b.setAttribute('aria-pressed', String(r === n));
+  });
+}
+
+async function rateLastRide(n) {
+  const rec = S.lastRide;
+  renderStars($('#end-stars'), n);
+  if (!rec) return;
+  const first = rec.rating == null;
+  const prev = rec.rating;
+  rec.rating = n;
+  try { await rateRide(rec.id, n); } catch { /* ignoré */ }
+  const f = S.summary?.option?.features || (S.summary?.option?.metrics?.degPerKm != null ? featureVector(S.summary.option.metrics) : null);
+  if (f) {
+    // Une note compte plus qu'un pouce ; si on change d'avis, on corrige l'apprentissage.
+    if (!first) learn(f, -((prev - 3) / 2) * 1.5, null);
+    learn(f, ((n - 3) / 2) * 1.5, null);
+  }
+  $('#end-rate-msg').textContent = n >= 4 ? 'Merci ! On te proposera plus de virées dans ce genre.' : n <= 2 ? 'Merci, noté : on évitera ce genre de parcours.' : 'Merci pour ta note !';
+}
+
+// --- Mes sorties ----------------------------------------------------------------------
+
+const RATING_COLORS = { 5: '#0B6E6E', 4: '#3A9E8F', 3: '#B88A00', 2: '#E8590C', 1: '#B42318', 0: '#7A8087' };
+const ratingColor = (r) => RATING_COLORS[r || 0];
+
+function starsText(n) {
+  return n ? '★'.repeat(n) + '☆'.repeat(5 - n) : 'pas encore notée';
+}
+
+async function openRides() {
+  S.history.push('screen-rides');
+  show('screen-rides', { push: false });
+  await renderRides();
+}
+
+async function renderRides(focusId = null) {
+  const rides = await listRides();
+  const liked = await listLiked();
+  const votes = loadVotes();
+  const real = rides.filter((r) => !r.simulated);
+  const km = real.reduce((a, r) => a + (r.km || 0), 0);
+  const hours = real.reduce((a, r) => a + (r.movingS || 0), 0) / 3600;
+  const rated = real.filter((r) => r.rating);
+  const avg = rated.length ? rated.reduce((a, r) => a + r.rating, 0) / rated.length : 0;
+  $('#rides-stats').innerHTML = [
+    [String(real.length), real.length > 1 ? 'sorties' : 'sortie'],
+    [Math.round(km).toLocaleString('fr-FR') + ' km', 'au total'],
+    [hours >= 1 ? Math.floor(hours) + ' h ' + String(Math.round((hours % 1) * 60)).padStart(2, '0') : Math.round(hours * 60) + ' min', 'de roulage'],
+  ].map(([v, l]) => `<div><dt>${l}</dt><dd>${v}</dd></div>`).join('');
+  $('#rides-empty').hidden = rides.length > 0;
+  $('#rides-legend').innerHTML = [5, 4, 3, 2, 1, 0].map((r) => `<span><i style="background:${ratingColor(r)}"></i>${r ? r + '★' : 'non notée'}</span>`).join('') + (avg ? `<span style="margin-left:auto">note moyenne ${avg.toFixed(1).replace('.', ',')} ★</span>` : '');
+
+  // Carte de toutes les sorties.
+  if (!S.maps.rides) S.maps.rides = createMap('rides-map');
+  const map = S.maps.rides;
+  if (S.ridesLayer) S.ridesLayer.remove();
+  const g = L.layerGroup().addTo(map);
+  const all = [];
+  const lines = {};
+  for (const r of rides.slice().reverse()) {
+    const tr = rideTrack(r);
+    if (tr.length < 2) continue;
+    all.push(...tr);
+    const focus = r.id === focusId;
+    if (focus) L.polyline(tr, { color: '#FFFFFF', weight: 9, opacity: 0.9 }).addTo(g);
+    lines[r.id] = L.polyline(tr, { color: ratingColor(r.rating), weight: focus ? 6 : 4, opacity: r.simulated ? 0.5 : 0.9, dashArray: r.simulated ? '6 6' : null }).addTo(g);
+    lines[r.id].on('click', () => renderRides(r.id));
+  }
+  S.ridesLayer = g;
+  setTimeout(() => {
+    map.invalidateSize();
+    const fit = focusId && lines[focusId] ? lines[focusId].getBounds() : (all.length ? L.latLngBounds(all) : null);
+    if (fit) map.fitBounds(fit, { padding: [20, 20] });
+    else map.setView(startPoint() || S.gps?.pos || [45.07, 7.4], 9);
+  }, 60);
+
+  // Liste des sorties.
+  $('#rides-section').hidden = rides.length === 0;
+  $('#rides-list').innerHTML = rides.map((r) => {
+    const d = new Date(r.date);
+    return `<li class="item ${r.id === focusId ? 'focus' : ''}" data-id="${r.id}">
+      <div class="item-head"><span class="item-swatch" style="background:${ratingColor(r.rating)}"></span>
+        <div style="flex:1;min-width:0"><div class="item-name">${escapeHtml(r.name)}${r.simulated ? ' <span class="badge">simulation</span>' : ''}</div>
+        <div class="item-sub">${d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })} · ${String(r.km).replace('.', ',')} km · ${fmtDuration(r.movingS / 60)}</div></div></div>
+      <div class="stars small" role="group" aria-label="Note de ${escapeHtml(r.name)}">${[1, 2, 3, 4, 5].map((n) => `<button type="button" data-r="${n}" aria-label="${n} étoile${n > 1 ? 's' : ''}"><svg aria-hidden="true"><use href="#${n <= (r.rating || 0) ? 'i-star' : 'i-star-o'}"/></svg></button>`).join('')}</div>
+      <div class="item-actions">
+        <button type="button" data-act="show">Voir sur la carte</button>
+        <button type="button" data-act="redo"><svg aria-hidden="true"><use href="#i-play"/></svg>Refaire</button>
+        <button type="button" data-act="gpx"><svg aria-hidden="true"><use href="#i-download"/></svg>GPX</button>
+        <button type="button" data-act="del" class="danger" aria-label="Supprimer cette sortie"><svg aria-hidden="true"><use href="#i-trash"/></svg></button>
+      </div></li>`;
+  }).join('');
+  $$('#rides-list .item').forEach((li) => {
+    const r = rides.find((x) => x.id === li.dataset.id);
+    li.querySelectorAll('.stars button').forEach((b) => b.addEventListener('click', async () => {
+      const n = +b.dataset.r;
+      const prev = r.rating;
+      await rateRide(r.id, n);
+      const f = r.option?.metrics ? featureVector(r.option.metrics) : null;
+      if (f) { if (prev) learn(f, -((prev - 3) / 2) * 1.5, null); learn(f, ((n - 3) / 2) * 1.5, null); }
+      renderRides(r.id);
+    }));
+    li.querySelector('[data-act="show"]').addEventListener('click', () => { renderRides(r.id); $('#screen-rides .scroll').scrollTo({ top: 0, behavior: 'smooth' }); });
+    li.querySelector('[data-act="redo"]').addEventListener('click', () => {
+      if (!r.option) { toast('Parcours non disponible'); return; }
+      const opt = unpackOption(r.option);
+      opt.id = 'h' + r.id;
+      openDetail(opt, { fromHistory: true });
+    });
+    li.querySelector('[data-act="gpx"]').addEventListener('click', () => downloadText(slug(r.name) + '-trace.gpx', trackGpx(r.name, rideTrack(r).map((p) => [p[0], p[1], r.date]))));
+    const del = li.querySelector('[data-act="del"]');
+    del.addEventListener('click', async () => {
+      if (del.dataset.confirm !== '1') { del.dataset.confirm = '1'; del.innerHTML = 'Confirmer la suppression'; return; }
+      await deleteRide(r.id);
+      renderRides();
+    });
+  });
+
+  // Parcours aimés.
+  $('#liked-section').hidden = liked.length === 0;
+  $('#liked-list').innerHTML = liked.map((l) => {
+    const o = l.option;
+    return `<li class="item" data-id="${l.id}"><div class="item-name">${escapeHtml(o.name)}</div>
+      <div class="item-sub">${o.mode === 'loop' ? 'Boucle' : 'Trajet'} · ${fmtDuration(o.route.timeS / 60)} · ${Math.round(o.route.lengthKm)} km · aimé le ${new Date(l.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</div>
+      <div class="item-actions"><button type="button" data-act="open"><svg aria-hidden="true"><use href="#i-play"/></svg>Ouvrir</button><button type="button" data-act="del" class="danger">Retirer</button></div></li>`;
+  }).join('');
+  $$('#liked-list .item').forEach((li) => {
+    const l = liked.find((x) => x.id === li.dataset.id);
+    li.querySelector('[data-act="open"]').addEventListener('click', () => {
+      const opt = unpackOption(l.option);
+      opt.id = l.id; opt.liked = true;
+      openDetail(opt, { fromHistory: true });
+    });
+    li.querySelector('[data-act="del"]').addEventListener('click', async () => { await deleteLiked(l.id); renderRides(); });
+  });
+
+  // Historique des votes.
+  $('#votes-section').hidden = votes.length === 0;
+  $('#votes-list').innerHTML = votes.slice(0, 40).map((v) => `<li class="item"><svg aria-hidden="true" style="color:${v.vote === 'up' ? 'var(--teal)' : 'var(--accent)'}"><use href="#i-${v.vote === 'up' ? 'up' : 'down'}"/></svg><span style="flex:1;min-width:0">${escapeHtml(v.name)}</span><span class="item-sub">${v.km} km · ${new Date(v.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</span></li>`).join('');
+}
+
+// --- Goûts appris (réglages) ---------------------------------------------------------
+
+function renderTastes() {
+  const p = loadPrefs();
+  $('#tastes').innerHTML = TASTES.map(({ key, label }) => {
+    const v = p[key] || 0;
+    const w = Math.abs(v) * 50;
+    const left = v >= 0 ? 50 : 50 - w;
+    const txt = Math.abs(v) < 0.08 ? 'neutre' : v > 0.5 ? 'adore' : v > 0 ? 'aime' : v < -0.5 ? 'évite' : 'bof';
+    return `<div class="taste"><span>${label}</span><span class="taste-bar" role="img" aria-label="${label} : ${txt}"><i style="left:${left}%;width:${w}%;background:${v >= 0 ? 'var(--teal)' : 'var(--accent)'}"></i></span><span>${txt}</span></div>`;
+  }).join('') + `<p class="hint" style="padding:8px 14px 12px;margin:0">${p.n ? `Appris de ${p.n} vote${p.n > 1 ? 's' : ''} et notes.` : 'Vote pour des parcours (pouce haut ou bas) et note tes sorties : l\'appli apprendra ce que tu aimes.'}</p>`;
+}
+
+// --- Adresses récentes -------------------------------------------------------------------
+
+const RECENT_KEY = 'viree.recent.v1';
+function recentPlaces() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; }
+}
+function rememberPlace(it) {
+  if (!it || !it.point) return;
+  const list = recentPlaces().filter((x) => x.label !== it.label);
+  list.unshift({ label: it.label, sub: it.sub || '', point: it.point });
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 6))); } catch { /* ignoré */ }
 }
 
 // --- Démarrage -----------------------------------------------------------------
@@ -874,16 +1258,30 @@ async function init() {
   $('#discovery').addEventListener('change', () => saveSettings(S.settings));
   $('#fuel').addEventListener('change', (e) => { S.settings.fuelKm = Math.max(0, parseFloat(e.target.value) || 0); saveSettings(S.settings); });
   $('#home-form').addEventListener('submit', (e) => { e.preventDefault(); startSearch(); });
-  $('#open-settings').addEventListener('click', () => { renderSettings(); show('screen-settings'); });
+  $('#open-settings').addEventListener('click', () => { renderSettings(); renderTastes(); show('screen-settings'); });
   $$('[data-back]').forEach((b) => b.addEventListener('click', () => { back(); renderHome(); }));
 
-  $('#search-cancel').addEventListener('click', () => { S.plan?.controller.abort(); S.plan = null; S.history = ['screen-home']; show('screen-home', { push: false }); });
-  $('#search-early').addEventListener('click', () => { if (S.plan) { S.plan.control.stopEarly = true; $('#search-early').disabled = true; $('#search-early').textContent = 'Finalisation…'; } });
-  $('#search-edit').addEventListener('click', () => { S.history = ['screen-home']; show('screen-home', { push: false }); });
-  $('#search-retry').addEventListener('click', () => startSearch());
-  $('#list-back').addEventListener('click', () => { S.history = ['screen-home']; show('screen-home', { push: false }); });
-  $('#detail-back').addEventListener('click', () => { S.history = ['screen-home', 'screen-list']; show('screen-list', { push: false }); });
-  $('#detail-others').addEventListener('click', () => { S.history = ['screen-home', 'screen-list']; show('screen-list', { push: false }); });
+  $('#list-back').addEventListener('click', () => { CURRENT.session?.cancel(); S.history = ['screen-home']; show('screen-home', { push: false }); });
+  $('#list-again').addEventListener('click', () => { CURRENT.session?.cancel(); S.history = ['screen-home']; show('screen-home', { push: false }); });
+  $('#list-edit').addEventListener('click', () => { S.history = ['screen-home']; show('screen-home', { push: false }); });
+  $('#list-retry').addEventListener('click', () => startSearch());
+  $('#list-stop').addEventListener('click', () => { CURRENT.session?.stop(); $('#ticker').textContent = 'Arrêt après le parcours en cours…'; });
+  $('#list-more').addEventListener('click', loadMore);
+  $('#detail-back').addEventListener('click', () => {
+    if (S.option?.fromHistory) { back(); return; }
+    S.history = ['screen-home', 'screen-list']; show('screen-list', { push: false });
+  });
+  $('#detail-others').addEventListener('click', () => {
+    if (S.option?.fromHistory) { back(); return; }
+    S.history = ['screen-home', 'screen-list']; show('screen-list', { push: false });
+  });
+  $('#detail-like').addEventListener('click', () => S.option && toggleLike(S.option));
+  $('#detail-dislike').addEventListener('click', () => {
+    const o = S.option;
+    if (!o) return;
+    S.history = ['screen-home', 'screen-list']; show('screen-list', { push: false });
+    dislike(o);
+  });
   $('#detail-go').addEventListener('click', () => startNav());
   $('#detail-sim').addEventListener('click', () => startNav({ simulate: true }));
   $('#detail-gpx').addEventListener('click', () => downloadText(slug(S.option.name) + '.gpx', routeGpx(S.option)));
@@ -905,7 +1303,19 @@ async function init() {
   });
   $('#end-route-gpx').addEventListener('click', () => S.summary && downloadText(slug(S.summary.option.name) + '.gpx', routeGpx(S.summary.option)));
   $('#end-new').addEventListener('click', () => { S.history = ['screen-home']; show('screen-home', { push: false }); });
+  $('#end-rides').addEventListener('click', () => { S.history = ['screen-home']; openRides(); });
+  $$('#end-stars button').forEach((b) => b.addEventListener('click', () => rateLastRide(+b.dataset.r)));
+  $('#open-rides').addEventListener('click', openRides);
+  $('#rides-back').addEventListener('click', back);
+  $('#reset-tastes').addEventListener('click', () => { resetPrefs(); renderTastes(); toast('Goûts remis à zéro', 2000); });
+  $('#clear-votes').addEventListener('click', () => { clearVotes(); toast('Votes effacés : les parcours refusés pourront être reproposés', 3500); });
 
+  $('#gps-chip').addEventListener('click', () => {
+    if (S.gpsError === 'denied' || S.gpsError === 'unsupported') toast(GPS_HELP, 9000);
+    else if (S.gps) toast(`Position trouvée, précision ${Math.round(S.gps.accuracy)} m`, 2500);
+    else toast('Recherche de la position… (à l\'intérieur, le GPS peut mettre une minute)', 4000);
+    if (!MOCK) restartGps();
+  });
   startGps();
   if (!MOCK && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -40,6 +40,12 @@
     <symbol id="i-target" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></g></symbol>
     <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
     <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v4"/><path d="M12 17.5v.5"/></g></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/></g></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11v9H4v-9z"/><path d="M7 11l4-8a2.5 2.5 0 0 1 2.5 2.5V9h5.2a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.5 20H7"/></g></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 13V4H4v9z"/><path d="M7 13l4 8a2.5 2.5 0 0 0 2.5-2.5V15h5.2a2 2 0 0 0 2-2.3l-1.2-7A2 2 0 0 0 17.5 4H7"/></g></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z" fill="currentColor"/></symbol>
+    <symbol id="i-star-o" viewBox="0 0 24 24"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></g></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
   </defs>
 </svg>
@@ -53,7 +59,10 @@
         <div class="brand-mark"><svg width="22" height="22" style="color:#fff" aria-hidden="true"><use href="#i-logo"/></svg></div>
         <span class="brand-name">Virée</span>
       </div>
-      <button class="icon-btn" type="button" id="open-settings" aria-label="Réglages"><svg aria-hidden="true"><use href="#i-sliders"/></svg></button>
+      <div style="display:flex;gap:8px">
+        <button class="icon-btn" type="button" id="open-rides" aria-label="Mes sorties"><svg aria-hidden="true"><use href="#i-history"/></svg></button>
+        <button class="icon-btn" type="button" id="open-settings" aria-label="Réglages"><svg aria-hidden="true"><use href="#i-sliders"/></svg></button>
+      </div>
     </header>
     <div class="scroll">
       <form class="content" id="home-form" novalidate>
@@ -65,19 +74,21 @@
         </div>
 
         <div class="set-section">
-          <span class="label" id="places-label">Départ et arrivée</span>
+          <span class="label" id="places-label">Départ et retour</span>
           <div class="places">
             <div class="place-row" data-place="start">
               <svg aria-hidden="true" style="color:var(--accent)"><use href="#i-pin"/></svg>
               <label for="start-input" class="ab-only" hidden>Départ</label>
-              <input id="start-input" autocomplete="off" aria-label="Départ" placeholder="Ma position actuelle">
-              <span class="gps-chip" id="gps-chip"><i></i>GPS</span>
+              <input id="start-input" autocomplete="off" aria-label="Départ" placeholder="Tape une ville ou une adresse">
+              <button type="button" class="clear" aria-label="Revenir à ma position" hidden><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+              <button type="button" class="gps-chip" id="gps-chip" aria-label="État du GPS"><i></i><span>GPS…</span></button>
               <div class="suggest" hidden></div>
             </div>
             <div class="place-row ab-only" data-place="end" hidden>
               <svg aria-hidden="true"><use href="#i-flag"/></svg>
               <label for="end-input">Arrivée</label>
               <input id="end-input" autocomplete="off" placeholder="Ville, adresse…">
+              <button type="button" class="clear" aria-label="Effacer l'arrivée" hidden><svg aria-hidden="true"><use href="#i-close"/></svg></button>
               <div class="suggest" hidden></div>
             </div>
           </div>
@@ -197,36 +208,20 @@
           </div>
           <p class="hint">Auto : thème nuit entre le coucher et le lever du soleil.</p>
         </section>
-        <p class="about">Itinéraires : Valhalla (serveur public FOSSGIS). Lieux : OpenStreetMap via Overpass. Adresses : Photon. Cartes : © contributeurs OpenStreetMap, © CARTO. Les durées sont des estimations : roule à ton rythme et respecte la signalisation.</p>
+        <section class="set-section">
+          <h2 class="label" style="margin:0">Tes goûts (appris de tes votes)</h2>
+          <div class="set-list" id="tastes"></div>
+          <div class="btn-row">
+            <button class="btn-secondary" type="button" id="reset-tastes">Réinitialiser mes goûts</button>
+            <button class="btn-secondary" type="button" id="clear-votes">Effacer mes votes</button>
+          </div>
+        </section>
+        <p class="about">Itinéraires : Valhalla (serveur public FOSSGIS). Lieux : OpenStreetMap via Overpass. Adresses : Photon. Cartes : © contributeurs OpenStreetMap. Les durées sont des estimations : roule à ton rythme et respecte la signalisation.</p>
       </div>
     </div>
   </section>
 
-  <!-- 2a · Recherche -->
-  <section class="screen" id="screen-search" aria-labelledby="search-title">
-    <div class="map-box">
-      <div id="search-map"></div>
-      <button class="map-float" type="button" id="search-cancel"><svg aria-hidden="true"><use href="#i-back"/></svg>Annuler</button>
-    </div>
-    <div class="scroll">
-      <div class="content" style="padding-top:18px">
-        <div>
-          <h1 id="search-title">On te prépare des virées…</h1>
-          <p class="subtitle" id="search-sub"></p>
-        </div>
-        <ol class="steps" id="search-steps"></ol>
-        <div class="error-box" id="search-error" hidden></div>
-        <p class="hint" id="search-note">Compte une trentaine de secondes : le serveur d'itinéraires gratuit accepte une demande par seconde.</p>
-        <button class="btn-outline" type="button" id="search-early" disabled>Voir les parcours trouvés</button>
-        <div class="btn-row" id="search-error-actions" hidden>
-          <button class="btn-secondary" type="button" id="search-edit">Modifier</button>
-          <button class="btn-secondary" type="button" id="search-retry">Réessayer</button>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- 2b · Liste -->
+  <!-- 2 · Recherche et liste des parcours -->
   <section class="screen" id="screen-list" aria-labelledby="list-title">
     <header class="topbar" style="flex-direction:column;align-items:stretch;gap:6px">
       <div class="title-row">
@@ -235,8 +230,26 @@
       </div>
       <p class="subtitle" id="list-sub" style="margin:0"></p>
     </header>
-    <div class="scroll">
-      <div class="content" id="route-list"></div>
+    <div class="scroll" id="list-scroll">
+      <div class="content">
+        <div class="progress" id="list-progress" aria-live="polite">
+          <div class="progress-row">
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="ticker" id="ticker">Préparation…</span>
+            <button type="button" class="btn-mini" id="list-stop">Arrêter</button>
+          </div>
+          <div class="bar"><i id="list-bar" style="width:4%"></i></div>
+          <span class="progress-meta" id="list-meta"></span>
+        </div>
+        <div id="route-list" class="route-list"></div>
+        <div class="error-box" id="list-msg" hidden></div>
+        <div class="btn-row" id="list-error-actions" hidden>
+          <button class="btn-secondary" type="button" id="list-edit">Modifier</button>
+          <button class="btn-secondary" type="button" id="list-retry">Réessayer</button>
+        </div>
+        <button class="btn-outline" type="button" id="list-more" hidden>Charger d'autres parcours</button>
+        <button type="button" class="btn-link" id="list-again">Changer les réglages et relancer</button>
+      </div>
     </div>
   </section>
 
@@ -253,6 +266,10 @@
           <p class="stat-line" id="detail-stats"></p>
           <p class="subtitle" id="detail-sub" style="font-size:14px"></p>
           <p class="warn-line" id="detail-warn" hidden></p>
+        </div>
+        <div class="btn-row" id="detail-votes">
+          <button class="btn-secondary vote-btn" type="button" id="detail-like" aria-pressed="false"><svg aria-hidden="true"><use href="#i-up"/></svg>J'aime</button>
+          <button class="btn-secondary vote-btn" type="button" id="detail-dislike"><svg aria-hidden="true"><use href="#i-down"/></svg>Pas pour moi</button>
         </div>
         <ol class="timeline" id="detail-timeline"></ol>
         <p class="updating" id="detail-updating" hidden>Mise à jour du guidage vers les pauses…</p>
@@ -325,17 +342,59 @@
           <p class="subtitle" id="end-sub"></p>
         </div>
         <div class="end-map"><div id="end-map"></div></div>
+        <section class="card rating-card" aria-labelledby="rate-title">
+          <h2 class="label" id="rate-title" style="margin:0">Note ce parcours</h2>
+          <div class="stars" role="group" aria-label="Note sur 5" id="end-stars">
+            <button type="button" data-r="1" aria-label="1 étoile"><svg aria-hidden="true"><use href="#i-star-o"/></svg></button>
+            <button type="button" data-r="2" aria-label="2 étoiles"><svg aria-hidden="true"><use href="#i-star-o"/></svg></button>
+            <button type="button" data-r="3" aria-label="3 étoiles"><svg aria-hidden="true"><use href="#i-star-o"/></svg></button>
+            <button type="button" data-r="4" aria-label="4 étoiles"><svg aria-hidden="true"><use href="#i-star-o"/></svg></button>
+            <button type="button" data-r="5" aria-label="5 étoiles"><svg aria-hidden="true"><use href="#i-star-o"/></svg></button>
+          </div>
+          <p class="hint" id="end-rate-msg">Ta note aide l'appli à mieux choisir tes prochaines virées.</p>
+        </section>
         <dl class="stats" id="end-stats"></dl>
         <div class="btn-row">
           <button class="btn-secondary" type="button" id="end-gpx"><svg aria-hidden="true"><use href="#i-download"/></svg>Ma trace GPX</button>
           <button class="btn-secondary" type="button" id="end-route-gpx"><svg aria-hidden="true"><use href="#i-download"/></svg>Parcours GPX</button>
         </div>
-        <button class="btn-primary" type="button" id="end-new">Nouvelle sortie</button>
+        <div class="btn-row">
+          <button class="btn-secondary" type="button" id="end-rides"><svg aria-hidden="true"><use href="#i-history"/></svg>Mes sorties</button>
+          <button class="btn-primary" type="button" id="end-new" style="min-height:48px;font-size:17px">Nouvelle sortie</button>
+        </div>
       </div>
     </div>
   </section>
 
-  <div class="toast" id="toast" role="status" hidden></div>
+  <!-- 4 · Mes sorties -->
+  <section class="screen" id="screen-rides" aria-labelledby="rides-title">
+    <header class="topbar" style="justify-content:flex-start">
+      <button class="icon-btn" type="button" id="rides-back" aria-label="Retour"><svg aria-hidden="true"><use href="#i-back"/></svg></button>
+      <h1 id="rides-title">Mes sorties</h1>
+    </header>
+    <div class="scroll">
+      <div class="content">
+        <dl class="stats" id="rides-stats"></dl>
+        <div class="rides-map"><div id="rides-map"></div></div>
+        <div class="legend" id="rides-legend" aria-label="Couleur des trajets selon la note"></div>
+        <p class="hint" id="rides-empty" hidden>Pas encore de sortie enregistrée. Elles apparaîtront ici à la fin de chaque virée.</p>
+        <section class="set-section" id="rides-section">
+          <h2 class="label" style="margin:0">Sorties</h2>
+          <ul class="item-list" id="rides-list"></ul>
+        </section>
+        <section class="set-section" id="liked-section">
+          <h2 class="label" style="margin:0">Parcours aimés, à faire</h2>
+          <ul class="item-list" id="liked-list"></ul>
+        </section>
+        <section class="set-section" id="votes-section">
+          <h2 class="label" style="margin:0">Mes votes</h2>
+          <ul class="item-list compact" id="votes-list"></ul>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" role="status" hidden><span id="toast-text"></span><button type="button" id="toast-action" hidden></button></div>
 </div>
 
 <script src="vendor/leaflet/leaflet.js"></script>

@@ -9,9 +9,21 @@ export const ENDPOINTS = {
   overpass: [
     'https://overpass-api.de/api/interpreter',
     'https://overpass.private.coffee/api/interpreter',
+    'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   ],
   photon: 'https://photon.komoot.io/api/',
 };
+
+// Combine le signal d'annulation de l'utilisateur et un délai maximal.
+function timed(signal, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new DOMException('Délai dépassé', 'TimeoutError')), ms);
+  if (signal) {
+    if (signal.aborted) ctrl.abort(signal.reason);
+    else signal.addEventListener('abort', () => ctrl.abort(signal.reason), { once: true });
+  }
+  return { signal: ctrl.signal, done: () => clearTimeout(timer) };
+}
 
 export class AbortedError extends Error {
   constructor() { super('Recherche annulée'); this.name = 'AbortedError'; }
@@ -71,14 +83,15 @@ export async function route(locations, settings, { signal, costing = {}, alterna
   return valhallaQueue.run(async () => {
     if (signal?.aborted) throw new AbortedError();
     let res;
-    try {
-      res = await fetch(url, { signal });
-    } catch (e) {
-      if (e.name === 'AbortError') throw new AbortedError();
-      throw new RouteError('Serveur d\'itinéraires injoignable (réseau ?)', 'network');
-    }
+    const t = timed(signal, 30000);
     let data = null;
-    try { data = await res.json(); } catch { /* réponse non JSON */ }
+    try {
+      res = await fetch(url, { signal: t.signal });
+      try { data = await res.json(); } catch { /* réponse non JSON */ }
+    } catch (e) {
+      if (signal?.aborted) throw new AbortedError();
+      throw new RouteError('Serveur d\'itinéraires injoignable ou trop lent (réseau ?)', 'network');
+    } finally { t.done(); }
     if (!res.ok || !data || !data.trip) {
       if (res.status === 429) throw new RouteError('Trop de demandes au serveur d\'itinéraires, réessaie dans une minute', 429);
       throw new RouteError((data && data.error) || ('Erreur du serveur d\'itinéraires (' + res.status + ')'), data?.error_code || res.status);
@@ -195,24 +208,26 @@ export function alongAtTime(r, tSec) {
 
 // --- Overpass ---------------------------------------------------------------
 
-export async function overpass(query, { signal } = {}) {
+// Essaie plusieurs serveurs Overpass, chacun avec un délai maximal (ils sont parfois saturés).
+export async function overpass(query, { signal, timeoutMs = 25000, maxTries = 3 } = {}) {
   let lastErr;
-  for (const ep of ENDPOINTS.overpass) {
+  for (const ep of ENDPOINTS.overpass.slice(0, maxTries)) {
     if (signal?.aborted) throw new AbortedError();
+    const t = timed(signal, timeoutMs);
     try {
       const res = await fetch(ep, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(query),
-        signal,
+        signal: t.signal,
       });
       if (!res.ok) { lastErr = new Error('Overpass ' + res.status); continue; }
       const data = await res.json();
       return data.elements || [];
     } catch (e) {
-      if (e.name === 'AbortError') throw new AbortedError();
+      if (signal?.aborted) throw new AbortedError();
       lastErr = e;
-    }
+    } finally { t.done(); }
   }
   throw lastErr || new Error('Overpass injoignable');
 }
@@ -228,7 +243,9 @@ export function elementPoint(el) {
 export async function searchPlaces(q, near, { signal } = {}) {
   const params = new URLSearchParams({ q, limit: '6', lang: 'fr' });
   if (near) { params.set('lat', near[0].toFixed(4)); params.set('lon', near[1].toFixed(4)); }
-  const res = await fetch(ENDPOINTS.photon + '?' + params, { signal });
+  const t = timed(signal, 10000);
+  let res;
+  try { res = await fetch(ENDPOINTS.photon + '?' + params, { signal: t.signal }); } finally { t.done(); }
   if (!res.ok) throw new Error('Recherche d\'adresse indisponible');
   const data = await res.json();
   return (data.features || []).map((f) => {

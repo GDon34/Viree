@@ -75,11 +75,17 @@ h1 { margin: 0; font-family: var(--cond); font-weight: 700; font-size: 32px; lin
 .place-row svg { width: 22px; height: 22px; flex-shrink: 0; }
 .place-row label { width: 64px; flex-shrink: 0; font-size: 14px; font-weight: 600; color: var(--muted); }
 .place-row input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 17px; font-weight: 600; padding: 14px 0; }
-.place-row .clear { width: 36px; height: 36px; border: 0; background: transparent; color: var(--muted); border-radius: 8px; padding: 0; }
-.gps-chip { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--teal); white-space: nowrap; }
-.gps-chip i { width: 8px; height: 8px; border-radius: 4px; background: var(--teal); }
+.place-row .clear { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--muted); border-radius: 10px; padding: 0; }
+.place-row .clear svg { width: 18px; height: 18px; }
+.gps-chip { display: flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; font-size: 14px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.gps-chip i { width: 8px; height: 8px; border-radius: 4px; background: #9AA0A6; animation: pulse 1.2s ease-in-out infinite; }
+.gps-chip.ok { color: var(--teal); }
+.gps-chip.ok i { background: var(--teal); animation: none; }
+.gps-chip.approx { color: var(--accent-ink); }
+.gps-chip.approx i { background: var(--accent); animation: none; }
 .gps-chip.bad { color: var(--accent-ink); }
-.gps-chip.bad i { background: var(--accent); }
+.gps-chip.bad i { background: var(--accent-ink); animation: none; }
+@keyframes pulse { 50% { opacity: .25; } }
 .suggest { position: absolute; left: 0; right: 0; top: 100%; z-index: 50; margin-top: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 24px rgba(21,24,27,.14); overflow: hidden; }
 .suggest button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-height: 52px; padding: 8px 14px; border: 0; border-bottom: 1px solid var(--divider); background: transparent; text-align: left; }
 .suggest button:last-child { border-bottom: 0; }
@@ -282,8 +288,75 @@ input[type=range] { width: 100%; height: 32px; margin: 0; accent-color: var(--ac
 .toast { position: fixed; left: 50%; bottom: calc(24px + var(--safe-bottom)); transform: translateX(-50%); z-index: 2000; max-width: 92vw; padding: 12px 16px; border-radius: 12px; background: #15181B; color: #fff; font-size: 15px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
 
 /* Leaflet */
+.map-night .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9) saturate(.5); }
 .leaflet-control-attribution { font-size: 10px; }
 .nav .leaflet-control-attribution { background: rgba(28,33,38,.7); color: #A3A9B0; }
 .nav .leaflet-control-attribution a { color: #FB8A3C; }
 .nav.light .leaflet-control-attribution { background: rgba(255,255,255,.7); color: #5B6168; }
 .leaflet-control-zoom { display: none; }
+
+/* --- Recherche progressive ------------------------------------------------- */
+.progress { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); }
+.progress-row { display: flex; align-items: center; gap: 10px; min-height: 36px; }
+.spinner { width: 22px; height: 22px; flex-shrink: 0; border-radius: 11px; border: 3px solid var(--accent); border-right-color: #F3C9B0; animation: spin 1s linear infinite; }
+.ticker { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; line-height: 1.3; animation: tick .35s ease-out; }
+@keyframes tick { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.progress .bar { margin-left: 0; }
+.progress-meta { font-size: 13px; color: var(--muted); }
+.btn-mini { min-height: 36px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--ground); font-size: 14px; font-weight: 600; flex-shrink: 0; }
+.route-list { display: flex; flex-direction: column; gap: 12px; }
+.empty-card { padding: 22px 16px; border-radius: 18px; border: 1.5px dashed var(--border); color: var(--muted); text-align: center; font-size: 15px; }
+
+/* Cartes de parcours avec votes */
+article.route-card { display: flex; gap: 0; padding: 0; position: relative; animation: cardIn .3s ease-out; }
+@keyframes cardIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+article.route-card.leaving { animation: cardOut .25s ease-in forwards; }
+@keyframes cardOut { to { opacity: 0; transform: translateX(40px); } }
+.card-main { flex: 1; min-width: 0; display: flex; gap: 14px; padding: 14px 4px 14px 14px; border: 0; background: transparent; text-align: left; border-radius: 18px; color: inherit; }
+.votes { display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 10px 10px 10px 0; }
+.vote { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--border); background: var(--ground); color: var(--muted); display: flex; align-items: center; justify-content: center; padding: 0; }
+.vote svg { width: 22px; height: 22px; }
+.vote.up[aria-pressed="true"] { background: var(--teal-soft); border-color: var(--teal); color: var(--teal-ink); }
+.vote-btn[aria-pressed="true"] { background: var(--teal-soft); border-color: var(--teal); color: var(--teal-ink); }
+.pending-line { font-size: 13px; color: var(--muted); }
+.best-flag { font-size: 12px; font-weight: 700; color: var(--accent-ink); text-transform: uppercase; letter-spacing: .6px; }
+
+/* Note */
+.stars { display: flex; gap: 6px; }
+.stars button { width: 48px; height: 48px; border: 0; background: transparent; color: #A87B00; padding: 4px; border-radius: 10px; }
+.stars button svg { width: 38px; height: 38px; }
+.stars.small button { width: 34px; height: 40px; padding: 2px; }
+.stars.small button svg { width: 24px; height: 24px; }
+
+/* Toast avec action */
+.toast { display: flex; align-items: center; gap: 14px; }
+.toast[hidden] { display: none; }
+#toast-action { min-height: 36px; padding: 0 12px; border-radius: 8px; border: 0; background: #FB8A3C; color: #111417; font-weight: 700; font-size: 15px; }
+
+/* Mes sorties */
+.rides-map { position: relative; height: 42vh; min-height: 240px; border-radius: 18px; overflow: hidden; border: 1px solid var(--border); flex-shrink: 0; background: #E5EBE0; }
+.rides-map .leaflet-container { position: absolute; inset: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 13px; color: var(--muted); }
+.legend span { display: flex; align-items: center; gap: 6px; }
+.legend i { width: 18px; height: 5px; border-radius: 3px; display: inline-block; }
+.item-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.item { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.item.focus { border: 2px solid var(--accent); }
+.item-head { display: flex; align-items: flex-start; gap: 10px; }
+.item-swatch { width: 6px; align-self: stretch; border-radius: 3px; flex-shrink: 0; }
+.item-name { font-family: var(--cond); font-size: 21px; font-weight: 700; line-height: 1.1; }
+.item-sub { font-size: 14px; color: var(--muted); }
+.item-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.item-actions button { min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--ground); font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.item-actions button svg { width: 18px; height: 18px; }
+.item-actions button.danger { color: var(--accent-ink); }
+.item-list.compact .item { flex-direction: row; align-items: center; padding: 8px 12px; gap: 10px; font-size: 14px; }
+.item-list.compact svg { width: 20px; height: 20px; flex-shrink: 0; }
+
+/* Goûts */
+.taste { display: grid; grid-template-columns: 150px minmax(0, 1fr) 64px; align-items: center; gap: 10px; min-height: 48px; padding: 0 14px; font-size: 15px; }
+.taste + .taste { border-top: 1px solid var(--divider); }
+.taste-bar { position: relative; height: 8px; border-radius: 4px; background: var(--seg); }
+.taste-bar::after { content: ''; position: absolute; left: 50%; top: -3px; width: 2px; height: 14px; background: var(--muted); }
+.taste-bar i { position: absolute; top: 0; height: 8px; border-radius: 4px; }
+.taste span:last-child { font-size: 13px; color: var(--muted); text-align: right; }

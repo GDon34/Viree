@@ -2,22 +2,23 @@
 
 Appli web pour Android qui propose des **sorties moto « découverte »** plutôt que le trajet le plus court : boucles ou trajets d'un point A à un point B, avec un degré de découverte de 0 à 100 %, des pauses toutes les heures et le plein d'essence prévu sur une pause.
 
-## Ce que fait la V1
+## Ce que fait l'appli
 
-- **Boucle** : départ (GPS ou adresse), durée de roulage, degré de découverte. Plus le degré est élevé, plus l'appli privilégie les virages, les cols, les belvédères et les lacs.
-- **Point A → point B** : durée souhaitée et durée max. 0 % = trajet le plus rapide, 50 % = milieu entre la durée souhaitée et la durée max, 100 % = durée max.
-- **Choix parmi 2 à 4 parcours**, chacun avec un nom inventé, sa durée, son kilométrage, une note de virages sur 5 et le nombre de panoramas.
-- **Pauses** (café, restaurant, belvédère, pique-nique, au choix) environ toutes les heures, au meilleur lieu à moins de 500 m du parcours. Une seule pause déjeuner, si l'heure s'y prête.
-- **Plein d'essence** : à partir de l'autonomie restante saisie au départ, la station est calée sur une pause avant d'entamer la marge de sécurité. L'appli prévient si aucune station n'est repérée à temps.
+- **Boucle** : départ et retour depuis ta position ou une adresse tapée (les adresses récentes sont proposées en premier), durée de roulage, degré de découverte. Plus le degré est élevé, plus l'appli privilégie virages, cols, belvédères et lacs.
+- **Point A → point B** : durée souhaitée et durée max. 0 % = trajet le plus rapide, 50 % = milieu entre durée souhaitée et durée max, 100 % = durée max.
+- **Recherche en direct** : les parcours s'affichent au fur et à mesure (8 d'abord), avec une ligne qui indique l'étape en cours. Le bouton « Charger d'autres parcours » en ajoute de nouveaux, tous différents.
+- **Votes** : pouce haut = parcours aimé (gardé dans « Mes sorties » pour le faire plus tard), pouce bas = parcours retiré de la liste (annulable) et plus jamais reproposé. Les votes et les notes apprennent tes goûts (virages, panoramas, lacs, routes tranquilles). Le résumé est dans les Réglages, avec une remise à zéro.
+- **Trajets déjà faits** : ils ne sont plus proposés. Si tout a déjà été fait, l'appli t'invite à augmenter la durée ou la découverte.
+- **Pauses** (café, restaurant, belvédère, pique-nique) environ toutes les heures. Une seule pause déjeuner. **Plein** calé sur une pause avant la marge de sécurité.
 - **Navigation** :
-  - instructions virage par virage, avec annonces vocales en français ;
-  - carte orientée dans le sens de la marche ;
-  - recalcul automatique pour **rejoindre le parcours prévu** si tu t'en écartes ;
-  - écran maintenu allumé ;
-  - jauge d'autonomie ;
-  - proposition de pause à l'approche, puis minuteur pendant la pause.
-- **Fin de sortie** : distance, temps de roulage, moyenne, export GPX de la trace et du parcours.
-- **Mode simulation** (bouton « Simuler ») : une fausse position roule le long du parcours pour tester le guidage depuis chez soi, en vitesse ×1, ×4 ou ×10, avec un bouton pour sortir volontairement du parcours.
+  - instructions vocales en français ;
+  - carte orientée dans le sens de la marche (thème nuit automatique) ;
+  - recalcul pour rejoindre le parcours ;
+  - proposition de pause puis minuteur ;
+  - jauge d'autonomie.
+- **Fin de sortie** : note sur 5 étoiles, bilan, export GPX.
+- **Mes sorties** : bilan des km et du temps de roulage, grande carte de tous tes trajets colorés selon leur note, liste des sorties (noter, revoir, refaire, GPX, supprimer), parcours aimés et historique des votes. Tout reste stocké sur le téléphone.
+- **Mode simulation** (bouton « Simuler ») pour tester le guidage depuis chez soi. Les sorties simulées sont marquées et ne comptent ni dans le bilan ni comme trajets déjà faits.
 
 ## Mise en ligne sur GitHub Pages (≈ 5 minutes)
 
@@ -50,6 +51,7 @@ Pour une mise à jour, il suffit d'uploader à nouveau les fichiers modifiés.
 - **Note de virages** : elle est calculée à partir du tracé (degrés de virage par km). Les seuils sont à **calibrer avec tes premières sorties réelles**.
 - **Pauses et stations** : elles viennent d'OpenStreetMap, sans horaires d'ouverture.
 - **Pas de mode hors ligne complet** : pas encore de téléchargement à l'avance des cartes d'une zone.
+- **Mémoire locale** : sorties, votes et goûts sont dans le navigateur du téléphone. Effacer les données du site dans Chrome les supprime.
 - Respecte toujours la signalisation : l'appli ne connaît ni les travaux ni les fermetures temporaires.
 
 ## Mode démo et tests (développement)
@@ -64,7 +66,8 @@ Pour une mise à jour, il suffit d'uploader à nouveau les fichiers modifiés.
 index.html            écrans de l'appli
 css/app.css           styles (repris des maquettes)
 js/app.js             logique des écrans
-js/planner.js         générateur de parcours (candidats, notation, sélection)
+js/planner.js         générateur de parcours (recherche progressive, notation, goûts)
+js/store.js           mémoire locale (sorties, parcours aimés, votes, goûts)
 js/stops.js           pauses et plein
 js/names.js           noms de parcours
 js/navigator.js       moteur de guidage (suivi GPS, annonces, recalcul)
@@ -80,6 +83,6 @@ tests/                monde simulé et tests
 
 ## Crédits et licences
 
-- Données cartographiques © contributeurs OpenStreetMap (ODbL). Fonds de carte © CARTO.
+- Données et fonds de carte © contributeurs OpenStreetMap (ODbL).
 - Itinéraires : Valhalla, serveur public FOSSGIS e.V. Adresses : Photon (komoot).
 - Leaflet (BSD-2-Clause), leaflet-rotate (GPL-3.0), polices Barlow et Barlow Condensed (SIL Open Font License). Les licences sont dans `vendor/` et `fonts/`.

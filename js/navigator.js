@@ -258,6 +258,7 @@ export class NavEngine {
       pauseS: this.pauseS,
       pausesDone: this.stops.filter((s) => s.state === 'done').length,
       reroutes: this.reroutes,
+      simulated: !!this.simulated,
       option: this.option,
       startedAt: this.startedAt,
       endedAt: Date.now(),

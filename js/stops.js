@@ -24,13 +24,12 @@ export function stopQuery(routes) {
   for (const r of routes) {
     const c = lineCoords(r);
     parts.push(
-      `node["amenity"~"^(cafe|bar|restaurant|fast_food|ice_cream|fuel)$"](around:500,${c});`,
-      `way["amenity"~"^(cafe|restaurant|fuel)$"](around:500,${c});`,
+      `nw["amenity"~"^(cafe|bar|restaurant|fast_food|ice_cream|fuel)$"](around:500,${c});`,
       `node["tourism"~"^(viewpoint|picnic_site)$"](around:400,${c});`,
-      `node["leisure"="picnic_table"](around:300,${c});`,
     );
   }
-  return `[out:json][timeout:30];(\n${parts.join('\n')}\n);out center tags;`;
+  // « out center; » garde les coordonnées des nœuds et donne le centre des surfaces.
+  return `[out:json][timeout:30];(\n${parts.join('\n')}\n);out center;`;
 }
 
 export function classifyStop(el) {
@@ -55,7 +54,7 @@ export function classifyStop(el) {
 
 export async function fetchStopPois(routes, settings, { signal } = {}) {
   if (!routes.length) return [];
-  const els = await overpass(stopQuery(routes), { signal });
+  const els = await overpass(stopQuery(routes), { signal, timeoutMs: 30000 });
   const seen = new Set();
   const out = [];
   for (const el of els) {

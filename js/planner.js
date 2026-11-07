@@ -7,7 +7,8 @@ import {
 } from './geo.js';
 import { route, overpass, elementPoint, RouteError, AbortedError } from './services.js';
 import { fetchStopPois, placeStops } from './stops.js';
-import { nameRoutes } from './names.js';
+import { nameFor, assignBadges } from './names.js';
+import { cellsOfShape, coverage } from './store.js';
 
 // --- Règles de durée ---------------------------------------------------------
 
@@ -26,19 +27,19 @@ export function abTargetMinutes(fastMin, wishMin, maxMin, d) {
 const INTEREST_WEIGHTS = { pass: 3, viewpoint: 2, lake: 2, waterfall: 1.5, castle: 1.5 };
 
 function interestQuery(area) {
-  const f = area.type === 'around'
-    ? `(around:${Math.round(area.radius)},${area.center[0].toFixed(5)},${area.center[1].toFixed(5)})`
-    : `(${area.bbox.s.toFixed(4)},${area.bbox.w.toFixed(4)},${area.bbox.n.toFixed(4)},${area.bbox.e.toFixed(4)})`;
-  return `[out:json][timeout:30];(
-node["tourism"="viewpoint"]${f};
-node["mountain_pass"="yes"]${f};
-node["natural"="saddle"]["name"]${f};
-way["natural"="water"]["water"~"^(lake|reservoir)$"]["name"]${f};
-relation["natural"="water"]["water"~"^(lake|reservoir)$"]["name"]${f};
-node["waterway"="waterfall"]${f};
-node["historic"~"^(castle|ruins|monastery|fort)$"]["name"]${f};
-way["historic"~"^(castle|fort)$"]["name"]${f};
-);out center tags;`;
+  const bb = area.type === 'around'
+    ? bbox([area.center], area.radius)
+    : area.bbox;
+  // Attention : « out center; » (et non « out tags ») pour garder les coordonnées des nœuds.
+  return `[out:json][timeout:25][bbox:${bb.s.toFixed(4)},${bb.w.toFixed(4)},${bb.n.toFixed(4)},${bb.e.toFixed(4)}];(
+node["tourism"="viewpoint"];
+node["mountain_pass"="yes"];
+node["natural"="saddle"]["name"];
+way["natural"="water"]["water"~"^(lake|reservoir)$"]["name"];
+node["waterway"="waterfall"];
+node["historic"~"^(castle|ruins|monastery|fort)$"]["name"];
+way["historic"~"^(castle|fort)$"]["name"];
+);out center;`;
 }
 
 export function classifyInterest(el) {
@@ -65,7 +66,7 @@ export function classifyInterest(el) {
 
 async function fetchInterest(area, signal) {
   try {
-    const els = await overpass(interestQuery(area), { signal });
+    const els = await overpass(interestQuery(area), { signal, timeoutMs: 20000, maxTries: 2 });
     return els.map(classifyInterest).filter(Boolean);
   } catch (e) {
     if (e instanceof AbortedError) throw e;
@@ -285,192 +286,272 @@ export function scoreRoute(m, r, ctx) {
   return s;
 }
 
-function cellsOf(r) {
-  const set = new Set();
-  const pts = resample(r.shape, r.cum, 250);
-  for (const p of pts) set.add(cellKey(p, 500));
-  return set;
+// --- Goûts appris -------------------------------------------------------------
+
+export function featureVector(m) {
+  return {
+    curv: Math.min(1, m.degPerKm / 160),
+    pano: Math.min(1, m.panoramaScore / 8),
+    lake: Math.min(1, (m.lakes?.length || 0) / 2),
+    calm: 1 - Math.min(1, m.manDensity / 8),
+  };
 }
 
-function similarity(a, b) {
-  let inter = 0;
-  for (const k of a) if (b.has(k)) inter++;
-  return inter / Math.max(1, Math.min(a.size, b.size));
+function personalBonus(f, prefs) {
+  if (!prefs) return 0;
+  return 0.8 * ((prefs.curv || 0) * (f.curv - 0.5) + (prefs.pano || 0) * (f.pano - 0.5)
+    + (prefs.lake || 0) * (f.lake - 0.5) + (prefs.calm || 0) * (f.calm - 0.5));
 }
 
-export function selectDiverse(cands, k, maxSim = 0.6) {
-  const sorted = cands.slice().sort((a, b) => b.score - a.score);
-  const chosen = [];
-  for (const c of sorted) {
-    if (chosen.length >= k) break;
-    c.cells = c.cells || cellsOf(c.route);
-    if (chosen.every((o) => similarity(o.cells, c.cells) < maxSim)) chosen.push(c);
-  }
-  if (chosen.length < Math.min(2, sorted.length)) {
-    for (const c of sorted) if (!chosen.includes(c) && chosen.length < 2) chosen.push(c);
-  }
-  return chosen;
-}
+const DIRS = ['le nord', 'le nord-est', 'l\'est', 'le sud-est', 'le sud', 'le sud-ouest', 'l\'ouest', 'le nord-ouest'];
+const dirName = (brg) => DIRS[Math.round(((brg % 360) + 360) % 360 / 45) % 8];
 
-// --- Orchestration -----------------------------------------------------------
+// --- Session de recherche (résultats publiés au fil de l'eau) -----------------
 
 /*
- params = {
-   mode: 'loop' | 'ab', start: [lat,lon], end: [lat,lon],
-   durationMin (boucle), wishMin, maxMin (A→B), discovery: 0..1, fuelKm,
-   settings, departure: Date
- }
- hooks = { onProgress(evt), control: { stopEarly: false }, signal }
+ params = { mode, start, end, durationMin, wishMin, maxMin, discovery (0..1), fuelKm, settings, departure }
+ hooks  = { onStep(text), onRoute(option), onUpdate(option), onProgress({computed, budget, shown}), onDone(info), onError(err) }
+ memory = { exclusions: [{why, cells:Set}], prefs }
 */
-export async function planRoutes(params, hooks = {}) {
-  const { settings } = params;
-  const d = Math.max(0, Math.min(1, params.discovery));
-  const signal = hooks.signal;
-  const progress = (e) => hooks.onProgress && hooks.onProgress(e);
-  const control = hooks.control || {};
-  const seed = hashString(JSON.stringify([params.start, params.end, params.durationMin, d, Date.now() >> 16]));
-  const rand = rng(seed);
-
-  const ctx = { mode: params.mode, discovery: d };
-  let reference = null;
-  let area;
-
-  if (params.mode === 'ab') {
-    progress({ phase: 'reference' });
-    const refs = await route([
-      { lat: params.start[0], lon: params.start[1] },
-      { lat: params.end[0], lon: params.end[1] },
-    ], settings, { signal, alternates: d === 0 ? 2 : 0 });
-    const refList = Array.isArray(refs) ? refs : [refs];
-    reference = refList[0];
-    ctx.fastS = reference.timeS;
-    ctx.maxS = Math.max(params.maxMin * 60, ctx.fastS);
-    ctx.targetS = abTargetMinutes(ctx.fastS / 60, params.wishMin, params.maxMin, d) * 60;
-    progress({ phase: 'reference-done', route: reference, fastS: ctx.fastS, targetS: ctx.targetS });
-    const D = haversine(params.start, params.end);
-    area = { type: 'bbox', bbox: bbox([params.start, params.end], Math.min(60000, D * 0.8 + 10000)) };
-    if (d === 0 || ctx.targetS <= ctx.fastS * 1.05) {
-      // Au plus direct : l'itinéraire le plus rapide et ses variantes.
-      progress({ phase: 'poi' });
-      const pois = await fetchInterest(area, signal);
-      const cands = refList.map((r, i) => ({ route: r, waypoints: [], key: 'REF' + i, isReference: i === 0 }));
-      return finish(cands, pois, params, ctx, hooks, rand);
-    }
-  } else {
-    ctx.targetS = params.durationMin * 60;
-    const speed = 14.4 * (1 - 0.15 * d);
-    const r = (ctx.targetS * speed / 1.35) / (2 * Math.PI * 0.9);
-    area = { type: 'around', center: params.start, radius: Math.min(120000, r * 2.3 + 5000) };
+export class PlanSession {
+  constructor(params, hooks = {}, memory = {}) {
+    this.params = params;
+    this.hooks = hooks;
+    this.exclusions = memory.exclusions || [];
+    this.prefs = memory.prefs || null;
+    this.d = Math.max(0, Math.min(1, params.discovery));
+    this.ctrl = new AbortController();
+    this.rand = rng(hashString(JSON.stringify([params.start, params.end, params.durationMin, this.d, Date.now() >> 16])));
+    this.ctx = { mode: params.mode, discovery: this.d };
+    this.shown = [];          // parcours proposés (y compris retirés, marqués removed)
+    this.i = 0;               // indice du prochain candidat
+    this.scale = 1;
+    this.usedNames = new Set();
+    this.pendingStops = [];
+    this.stats = { computed: 0, rejectedRide: 0, rejectedDown: 0, rejectedSimilar: 0, rejectedQuality: 0, failures: 0 };
+    this.running = false;
+    this.stopRequested = false;
+    this.pois = [];
+    this.stopPoiCache = new Map();
   }
 
-  progress({ phase: 'poi' });
-  const pois = await fetchInterest(area, signal);
-  progress({ phase: 'poi-done', count: pois.length });
+  get signal() { return this.ctrl.signal; }
+  get options() { return this.shown.filter((o) => !o.removed); }
+  step(t) { this.hooks.onStep?.(t); }
+  cancel() { this.ctrl.abort(); }
+  stop() { this.stopRequested = true; }
 
-  const total = params.mode === 'loop' ? 12 : 10;
-  const cands = reference ? [{ route: reference, waypoints: [], key: 'REF', isReference: true }] : [];
-  let scale = 1;
-  let straightTarget = 0;
-  if (params.mode === 'ab') {
-    const D = haversine(params.start, params.end);
-    const tau = Math.max(1.25, (reference.totalM) / Math.max(1, D));
-    const Ltarget = reference.totalM * Math.pow(ctx.targetS / ctx.fastS, 0.85);
-    straightTarget = Ltarget / tau;
-  }
-  let failures = 0;
-  for (let i = 0; i < total; i++) {
-    if (signal?.aborted) throw new AbortedError();
-    if (control.stopEarly && cands.length >= 2) break;
-    let cand;
-    if (params.mode === 'loop') {
-      cand = loopCandidate(i, params.start, ctx.targetS, d, pois, scale, rand);
+  async start() {
+    const p = this.params;
+    const settings = p.settings;
+    if (p.mode === 'ab') {
+      this.step('Calcul du trajet le plus rapide…');
+      const refs = await route([
+        { lat: p.start[0], lon: p.start[1] },
+        { lat: p.end[0], lon: p.end[1] },
+      ], settings, { signal: this.signal, alternates: this.d === 0 ? 2 : 0 });
+      const list = Array.isArray(refs) ? refs : [refs];
+      this.reference = list[0];
+      this.refAlternates = list.slice(1);
+      this.ctx.fastS = this.reference.timeS;
+      this.ctx.maxS = Math.max(p.maxMin * 60, this.ctx.fastS);
+      this.ctx.targetS = abTargetMinutes(this.ctx.fastS / 60, p.wishMin, p.maxMin, this.d) * 60;
+      const D = haversine(p.start, p.end);
+      this.area = { type: 'bbox', bbox: bbox([p.start, p.end], Math.min(60000, D * 0.8 + 10000)) };
+      const tau = Math.max(1.25, this.reference.totalM / Math.max(1, D));
+      const effTarget = Math.max(this.ctx.targetS, this.ctx.fastS * 1.15);
+      this.straightTarget = (this.reference.totalM * Math.pow(effTarget / this.ctx.fastS, 0.85)) / tau;
     } else {
-      const D = haversine(params.start, params.end);
-      const st = D + (straightTarget - D) * scale;
-      cand = abCandidate(i, params.start, params.end, st, d, pois, rand);
-      if (!cand) continue;
+      this.ctx.targetS = p.durationMin * 60;
+      const speed = 14.4 * (1 - 0.15 * this.d);
+      const r = (this.ctx.targetS * speed / 1.35) / (2 * Math.PI * 0.9);
+      this.area = { type: 'around', center: p.start, radius: Math.min(120000, r * 2.3 + 5000) };
     }
-    const locs = [{ lat: params.start[0], lon: params.start[1] }];
-    // Points de passage accrochés à une vraie route (ni autoroute, ni impasse résidentielle).
-    for (const w of cand.waypoints) locs.push({ lat: w[0], lon: w[1], type: 'through', filter: WAYPOINT_FILTER });
-    const end = params.mode === 'loop' ? params.start : params.end;
-    locs.push({ lat: end[0], lon: end[1] });
-    progress({ phase: 'candidates', done: i, total });
+    this.step('Repérage des cols, belvédères et lacs…');
+    this.pois = await fetchInterest(this.area, this.signal);
+    this.step(this.pois.length ? `${this.pois.length} cols, belvédères et lacs repérés` : 'Pas de points d\'intérêt trouvés, on se fie aux virages');
+    this.hooks.onPois?.(this.pois.length);
+
+    if (p.mode === 'ab' && (this.d === 0 || this.ctx.targetS <= this.ctx.fastS * 1.05)) {
+      // Au plus direct : le trajet le plus rapide et ses variantes, même s'ils ont déjà été faits.
+      [this.reference, ...this.refAlternates].forEach((r, k) => this.consider({ route: r, waypoints: [], key: 'REF' + k, isReference: k === 0 }, { ignoreHistory: true }));
+      await this.flushStops();
+      this.finishRun(0);
+      return;
+    }
+    await this.run(24, 8);
+  }
+
+  async more() {
+    if (this.running) return;
+    this.stopRequested = false;
+    // Pour « plus », on élargit un peu les variantes.
+    this.moreRounds = (this.moreRounds || 0) + 1;
+    await this.run(12, 8);
+  }
+
+  nextCandidate() {
+    const p = this.params;
+    const i = this.i++;
+    const prefs = this.prefs || {};
+    const snapBias = Math.max(0, Math.max(prefs.pano || 0, prefs.curv || 0, prefs.lake || 0)) * 0.3;
+    if (p.mode === 'loop') {
+      const round = Math.floor(i / LOOP_BEARINGS.length);
+      const sc = this.scale * (1 + [0, 0.12, -0.1, 0.2, -0.15][round % 5]);
+      const c = loopCandidate(i, p.start, this.ctx.targetS, Math.min(1, this.d + snapBias), this.pois, sc, this.rand);
+      c.label = 'boucle vers ' + dirName(bearing(p.start, c.waypoints[0]) + 30);
+      return c;
+    }
+    const D = haversine(p.start, p.end);
+    const round = Math.floor(i / 10);
+    const st = D + (this.straightTarget - D) * this.scale * (1 + [0, 0.1, -0.1, 0.18][round % 4]);
+    const c = abCandidate(i, p.start, p.end, st, Math.min(1, this.d + snapBias), this.pois, this.rand);
+    if (c) c.label = 'détour par ' + dirName(bearing(p.start, c.waypoints[Math.floor(c.waypoints.length / 2)]));
+    return c;
+  }
+
+  async run(budget, targetNew) {
+    this.running = true;
+    const p = this.params;
+    let computed = 0, added = 0, netFailures = 0;
     try {
-      const r = await route(locs, settings, { signal });
-      cand.route = r;
-      cands.push(cand);
-      progress({ phase: 'candidate', route: r, done: i + 1, total, found: cands.length });
-      // Calibrage progressif de la taille des boucles / détours sur la durée visée.
-      const ratio = r.timeS / ctx.targetS;
-      if (params.mode === 'loop') {
-        scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / ratio)), 0.7);
-      } else {
-        const extra = (r.timeS - ctx.fastS) / Math.max(60, ctx.targetS - ctx.fastS);
-        scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / Math.max(0.2, extra))), 0.6);
+      while (computed < budget && added < targetNew && !this.stopRequested) {
+        if (this.signal.aborted) throw new AbortedError();
+        const cand = this.nextCandidate();
+        if (!cand) { computed++; continue; }
+        const num = this.stats.computed + 1;
+        const poiName = cand.snap ? this.pois.find((x) => cand.waypoints.some((w) => haversine(w, x.point) < 50) && x.name)?.name : null;
+        this.step(`Parcours ${num} : ${cand.label}${poiName ? ' par ' + poiName : ''}…`);
+        const locs = [{ lat: p.start[0], lon: p.start[1] }];
+        for (const w of cand.waypoints) locs.push({ lat: w[0], lon: w[1], type: 'through', filter: WAYPOINT_FILTER });
+        const end = p.mode === 'loop' ? p.start : p.end;
+        locs.push({ lat: end[0], lon: end[1] });
+        try {
+          cand.route = await route(locs, p.settings, { signal: this.signal });
+          netFailures = 0;
+          // Calibrage progressif sur la durée visée.
+          const ratio = cand.route.timeS / this.ctx.targetS;
+          if (p.mode === 'loop') this.scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / ratio)), 0.6);
+          else {
+            const extra = (cand.route.timeS - this.ctx.fastS) / Math.max(60, this.ctx.targetS - this.ctx.fastS);
+            this.scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / Math.max(0.2, extra))), 0.5);
+          }
+          if (this.consider(cand)) added++;
+        } catch (e) {
+          if (e instanceof AbortedError) throw e;
+          if (e instanceof RouteError && (e.code === 'network' || e.code === 429)) {
+            if (++netFailures >= 3) {
+              if (this.options.length) break;
+              throw e;
+            }
+          } else this.stats.failures++;
+        }
+        computed++;
+        this.stats.computed++;
+        this.hooks.onProgress?.({ computed, budget, shown: this.options.length });
+        if (this.pendingStops.length >= 3) await this.flushStops();
       }
+      await this.flushStops();
+      this.finishRun(added);
+    } catch (e) {
+      if (!(e instanceof AbortedError)) this.hooks.onError?.(e);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  // Évalue un candidat et le publie s'il est bon, nouveau et différent des autres.
+  consider(cand, { ignoreHistory = false } = {}) {
+    const r = cand.route;
+    const m = analyzeRoute(r, this.pois, this.params.mode);
+    const ratio = r.timeS / this.ctx.targetS;
+    if (!cand.isReference) {
+      const badDuration = this.params.mode === 'loop' ? (ratio < 0.7 || ratio > 1.3) : (r.timeS > this.ctx.maxS * 1.05);
+      if (badDuration || m.overlap > 0.3) { this.stats.rejectedQuality++; return false; }
+    }
+    const cells = cellsOfShape(r.shape);
+    if (!ignoreHistory) {
+      for (const ex of this.exclusions) {
+        if (coverage(cells, ex.cells) >= 0.6) {
+          if (ex.why === 'ride') this.stats.rejectedRide++; else this.stats.rejectedDown++;
+          return false;
+        }
+      }
+    }
+    for (const o of this.shown) {
+      const sim = coverage(cells, o.cells) ;
+      const sim2 = coverage(o.cells, cells);
+      if (Math.max(sim, sim2) >= 0.6) { this.stats.rejectedSimilar++; return false; }
+    }
+    const f = featureVector(m);
+    const score = scoreRoute(m, r, this.ctx) + personalBonus(f, this.prefs);
+    const option = {
+      id: 'o' + Date.now().toString(36) + '-' + this.shown.length,
+      key: cand.key,
+      mode: this.params.mode,
+      start: this.params.start,
+      end: this.params.mode === 'loop' ? this.params.start : this.params.end,
+      waypoints: cand.waypoints,
+      route: r,
+      metrics: m,
+      features: f,
+      score,
+      cells,
+      stops: [],
+      stopsReady: false,
+      isReference: !!cand.isReference,
+    };
+    option.name = nameFor(option, this.params.mode, this.rand, this.usedNames);
+    this.usedNames.add(option.name);
+    this.shown.push(option);
+    this.pendingStops.push(option);
+    this.hooks.onRoute?.(option);
+    return true;
+  }
+
+  async flushStops(list = null) {
+    const todo = (list || this.pendingStops).filter((o) => !o.stopsReady);
+    if (!list) this.pendingStops = [];
+    if (!todo.length) return;
+    this.step('Recherche des cafés et stations le long des parcours…');
+    let pois = [];
+    try {
+      pois = await fetchStopPois(todo.map((o) => o.route), this.params.settings, { signal: this.signal });
     } catch (e) {
       if (e instanceof AbortedError) throw e;
-      if (e instanceof RouteError && (e.code === 'network' || e.code === 429)) {
-        if (cands.length >= 2) break;
-        throw e;
-      }
-      failures++;
-      if (failures > 6 && cands.length === 0) throw new RouteError('Aucun parcours trouvé autour de ce point de départ', 'none');
+    }
+    for (const o of todo) {
+      const res = placeStops(o.route, pois, this.params.settings, this.params.fuelKm, this.params.departure || new Date());
+      o.stops = res.stops;
+      o.fuelWarning = res.fuelWarning;
+      o.stopsReady = true;
+      o.stopPois = pois.length;
+      this.hooks.onUpdate?.(o);
     }
   }
-  if (!cands.length) throw new RouteError('Aucun parcours trouvé, essaie un autre point de départ ou une autre durée', 'none');
-  return finish(cands, pois, params, ctx, hooks, rand);
-}
 
-async function finish(cands, pois, params, ctx, hooks, rand) {
-  const progress = (e) => hooks.onProgress && hooks.onProgress(e);
-  progress({ phase: 'select' });
-  for (const c of cands) {
-    c.metrics = analyzeRoute(c.route, pois, params.mode);
-    c.score = scoreRoute(c.metrics, c.route, ctx);
+  // Pauses d'un parcours ouvert avant que la recherche ne les ait calculées.
+  async ensureStops(option) {
+    if (option.stopsReady) return;
+    this.pendingStops = this.pendingStops.filter((o) => o !== option);
+    await this.flushStops([option]);
   }
-  // En A→B on écarte ce qui dépasse la durée max (sauf l'itinéraire de référence).
-  let pool = cands;
-  if (params.mode === 'ab') {
-    const ok = cands.filter((c) => c.isReference || c.route.timeS <= ctx.maxS * 1.05);
-    if (ok.length) pool = ok;
-  }
-  const chosen = selectDiverse(pool, 4);
 
-  progress({ phase: 'stops' });
-  let stopPois = [];
-  try {
-    stopPois = await fetchStopPois(chosen.map((c) => c.route), params.settings, { signal: hooks.signal });
-  } catch (e) {
-    if (e instanceof AbortedError) throw e;
+  remove(option) { option.removed = true; this.assignBadges(); }
+  restore(option) { option.removed = false; this.assignBadges(); }
+
+  assignBadges() {
+    assignBadges(this.options);
   }
-  const departure = params.departure || new Date();
-  for (const c of chosen) {
-    const res = placeStops(c.route, stopPois, params.settings, params.fuelKm, departure);
-    c.stops = res.stops;
-    c.fuelWarning = res.fuelWarning;
+
+  finishRun(added) {
+    this.assignBadges();
+    const opts = this.options;
+    const best = opts.slice().sort((a, b) => b.score - a.score)[0];
+    for (const o of opts) o.best = o === best;
+    this.step(opts.length ? `${opts.length} parcours proposés` : 'Aucun parcours');
+    this.hooks.onDone?.({ added, total: opts.length, stats: { ...this.stats } });
   }
-  nameRoutes(chosen, params.mode, ctx, rand);
-  progress({ phase: 'done' });
-  return {
-    ctx,
-    options: chosen.map((c, i) => ({
-      id: c.key + '-' + i,
-      name: c.name,
-      badge: c.badge,
-      mode: params.mode,
-      start: params.start,
-      end: params.mode === 'loop' ? params.start : params.end,
-      waypoints: c.waypoints,
-      route: c.route,
-      metrics: c.metrics,
-      stops: c.stops,
-      fuelWarning: c.fuelWarning,
-      isReference: !!c.isReference,
-    })),
-    pois,
-  };
 }
 
 // Recalcule le parcours choisi en passant par les pauses (pour que le guidage y mène).
