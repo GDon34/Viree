@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#C2410C">
+<meta name="description" content="GPS moto pour des sorties découverte : boucles et itinéraires sinueux, pauses et plein prévus.">
+<title>Virée — GPS moto découverte</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M8 22c0-3 5-3 5-6.5S8 12 8 8.5 13 5 13 2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></g></symbol>
+    <symbol id="i-loop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></g></symbol>
+    <symbol id="i-ab" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><path d="M9 12h11"/><path d="M16 8l4 4-4 4"/></g></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></g></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/></g></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></g></symbol>
+    <symbol id="i-fuel" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16"/><path d="M3 21h12"/><path d="M4 10h10"/><path d="M14 8h2a2 2 0 0 1 2 2v6a1.5 1.5 0 0 0 3 0V9l-3-3"/></g></symbol>
+    <symbol id="i-cup" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V9z"/><path d="M16 10h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3v3M12 3v3"/></g></symbol>
+    <symbol id="i-fork" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10"/><path d="M17 3c-2 1-3 3-3 6v3h3v9"/></g></symbol>
+    <symbol id="i-tree" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l6 9h-4l4 6H6l4-6H6z"/><path d="M12 18v3"/></g></symbol>
+    <symbol id="i-mountain" viewBox="0 0 24 24"><path d="M3 19l6-9 4 6 3-4 5 7z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-water" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 9c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/><path d="M3 15c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/></g></symbol>
+    <symbol id="i-castle" viewBox="0 0 24 24"><path d="M4 21V8h3v3h3V8h4v3h3V8h3v13zM10 21v-5h4v5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15a1 1 0 0 0 1.5.9l12-7.5a1 1 0 0 0 0-1.8l-12-7.5A1 1 0 0 0 7 4.5z" fill="currentColor"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></g></symbol>
+    <symbol id="i-sim" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 13l4-3"/><path d="M9 3h6"/></g></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/></g></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 9l5 6M22 9l-5 6"/></g></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></g></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v4"/><path d="M12 17.5v.5"/></g></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  </defs>
+</svg>
+
+<div id="app">
+
+  <!-- 1 · Nouvelle sortie -->
+  <section class="screen active" id="screen-home" aria-labelledby="home-title">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"><svg width="22" height="22" style="color:#fff" aria-hidden="true"><use href="#i-logo"/></svg></div>
+        <span class="brand-name">Virée</span>
+      </div>
+      <button class="icon-btn" type="button" id="open-settings" aria-label="Réglages"><svg aria-hidden="true"><use href="#i-sliders"/></svg></button>
+    </header>
+    <div class="scroll">
+      <form class="content" id="home-form" novalidate>
+        <h1 id="home-title">Nouvelle sortie</h1>
+
+        <div class="segmented" role="group" aria-label="Type de sortie">
+          <button type="button" id="mode-loop" aria-pressed="true"><svg aria-hidden="true"><use href="#i-loop"/></svg>Boucle</button>
+          <button type="button" id="mode-ab" aria-pressed="false"><svg aria-hidden="true"><use href="#i-ab"/></svg>Point A → point B</button>
+        </div>
+
+        <div class="set-section">
+          <span class="label" id="places-label">Départ et arrivée</span>
+          <div class="places">
+            <div class="place-row" data-place="start">
+              <svg aria-hidden="true" style="color:var(--accent)"><use href="#i-pin"/></svg>
+              <label for="start-input" class="ab-only" hidden>Départ</label>
+              <input id="start-input" autocomplete="off" aria-label="Départ" placeholder="Ma position actuelle">
+              <span class="gps-chip" id="gps-chip"><i></i>GPS</span>
+              <div class="suggest" hidden></div>
+            </div>
+            <div class="place-row ab-only" data-place="end" hidden>
+              <svg aria-hidden="true"><use href="#i-flag"/></svg>
+              <label for="end-input">Arrivée</label>
+              <input id="end-input" autocomplete="off" placeholder="Ville, adresse…">
+              <div class="suggest" hidden></div>
+            </div>
+          </div>
+        </div>
+
+        <section class="card loop-only" aria-labelledby="dur-label">
+          <div class="row-between">
+            <h2 class="label" id="dur-label" style="margin:0">Durée de roulage</h2>
+            <span class="hint">pauses en plus</span>
+          </div>
+          <div class="stepper">
+            <button type="button" class="step-btn" data-step="duration" data-delta="-15" aria-label="Moins 15 minutes">−</button>
+            <output class="big-num" id="duration-out" aria-live="polite">3 h 00</output>
+            <button type="button" class="step-btn" data-step="duration" data-delta="15" aria-label="Plus 15 minutes">+</button>
+          </div>
+        </section>
+
+        <section class="card ab-only" hidden aria-label="Durées">
+          <div class="mini-steppers">
+            <div class="mini">
+              <span class="label">Durée souhaitée</span>
+              <div class="stepper">
+                <button type="button" class="step-btn" data-step="wish" data-delta="-15" aria-label="Durée souhaitée moins 15 minutes">−</button>
+                <output id="wish-out">2 h 00</output>
+                <button type="button" class="step-btn" data-step="wish" data-delta="15" aria-label="Durée souhaitée plus 15 minutes">+</button>
+              </div>
+            </div>
+            <div class="mini">
+              <span class="label">Durée max</span>
+              <div class="stepper">
+                <button type="button" class="step-btn" data-step="max" data-delta="-15" aria-label="Durée max moins 15 minutes">−</button>
+                <output id="max-out">4 h 00</output>
+                <button type="button" class="step-btn" data-step="max" data-delta="15" aria-label="Durée max plus 15 minutes">+</button>
+              </div>
+            </div>
+          </div>
+          <p class="info-line" id="fast-info"><svg aria-hidden="true"><use href="#i-clock"/></svg><span>Le plus rapide : choisis une arrivée</span></p>
+        </section>
+
+        <section class="card">
+          <div class="row-between">
+            <label class="label" for="discovery">Degré de découverte</label>
+            <output class="disc-value" id="discovery-out">60 %</output>
+          </div>
+          <input type="range" id="discovery" min="0" max="100" step="5" value="60">
+          <div class="ticks loop-only"><span>Au plus direct</span><span>Balade</span><span>Plaisir pur</span></div>
+          <div class="ticks ab-only" hidden id="ab-ticks"><span>0 %<br>—</span><span>50 %<br>—</span><span>100 %<br>—</span></div>
+          <p class="hint loop-only" id="discovery-hint" style="color:var(--ink)"></p>
+          <div class="target-box ab-only" hidden><span>Durée visée</span><b id="target-out">—</b></div>
+        </section>
+
+        <div class="card fuel-card">
+          <svg aria-hidden="true"><use href="#i-fuel"/></svg>
+          <div class="grow">
+            <label for="fuel" style="font-size:16px;font-weight:700">Autonomie restante</label>
+            <span class="hint">Le plein sera calé sur une pause</span>
+          </div>
+          <input class="num-input" id="fuel" type="number" inputmode="numeric" min="0" max="999" value="140">
+          <span class="unit">km</span>
+        </div>
+
+        <button class="btn-primary" type="submit" id="go">Trouver des parcours<svg aria-hidden="true"><use href="#i-arrow"/></svg></button>
+      </form>
+    </div>
+  </section>
+
+  <!-- Réglages -->
+  <section class="screen" id="screen-settings" aria-labelledby="settings-title">
+    <header class="topbar" style="justify-content:flex-start">
+      <button class="icon-btn" type="button" data-back aria-label="Retour"><svg aria-hidden="true"><use href="#i-back"/></svg></button>
+      <h1 id="settings-title">Réglages</h1>
+    </header>
+    <div class="scroll">
+      <div class="content">
+        <section class="set-section">
+          <h2 class="label" style="margin:0">Ma moto</h2>
+          <div class="set-list">
+            <label class="set-row"><span class="grow">Autonomie avec un plein</span><input class="num-input" type="number" inputmode="numeric" data-setting="fullTankKm" min="50" max="900"><span class="unit">km</span></label>
+            <label class="set-row"><span class="grow">Marge de sécurité</span><input class="num-input" type="number" inputmode="numeric" data-setting="safetyKm" min="0" max="200"><span class="unit">km</span></label>
+          </div>
+        </section>
+        <section class="set-section">
+          <h2 class="label" style="margin:0">Pauses</h2>
+          <div class="set-list">
+            <label class="set-row"><span class="grow">Une pause toutes les</span><input class="num-input" type="number" inputmode="numeric" data-setting="pauseEveryMin" min="20" max="300"><span class="unit">min</span></label>
+            <label class="set-row"><span class="grow">Durée d'une pause</span><input class="num-input" type="number" inputmode="numeric" data-setting="pauseDurationMin" min="5" max="120"><span class="unit">min</span></label>
+            <div class="chips" role="group" aria-label="Où s'arrêter">
+              <span class="chips-label">Où s'arrêter</span>
+              <button type="button" class="chip" data-pause-type="cafe">Café</button>
+              <button type="button" class="chip" data-pause-type="restaurant">Restaurant</button>
+              <button type="button" class="chip" data-pause-type="viewpoint">Belvédère</button>
+              <button type="button" class="chip" data-pause-type="picnic">Pique-nique</button>
+            </div>
+          </div>
+        </section>
+        <section class="set-section">
+          <h2 class="label" style="margin:0">Éviter</h2>
+          <div class="set-list checks">
+            <label class="check"><input type="checkbox" data-avoid="highways"> Autoroutes</label>
+            <label class="check"><input type="checkbox" data-avoid="tolls"> Péages</label>
+            <label class="check"><input type="checkbox" data-avoid="ferries"> Ferries</label>
+            <label class="check"><input type="checkbox" data-avoid="unpaved"> Non goudronné</label>
+          </div>
+        </section>
+        <section class="set-section">
+          <h2 class="label" style="margin:0">Guidage</h2>
+          <div class="set-list">
+            <label class="set-row"><span class="grow">Instructions vocales</span><input type="checkbox" data-setting="voice"></label>
+            <div class="set-row">
+              <span class="grow">Thème de navigation</span>
+              <div class="seg3" role="group" aria-label="Thème">
+                <button type="button" data-theme="auto">Auto</button>
+                <button type="button" data-theme="day">Jour</button>
+                <button type="button" data-theme="night">Nuit</button>
+              </div>
+            </div>
+          </div>
+          <p class="hint">Auto : thème nuit entre le coucher et le lever du soleil.</p>
+        </section>
+        <p class="about">Itinéraires : Valhalla (serveur public FOSSGIS). Lieux : OpenStreetMap via Overpass. Adresses : Photon. Cartes : © contributeurs OpenStreetMap, © CARTO. Les durées sont des estimations : roule à ton rythme et respecte la signalisation.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2a · Recherche -->
+  <section class="screen" id="screen-search" aria-labelledby="search-title">
+    <div class="map-box">
+      <div id="search-map"></div>
+      <button class="map-float" type="button" id="search-cancel"><svg aria-hidden="true"><use href="#i-back"/></svg>Annuler</button>
+    </div>
+    <div class="scroll">
+      <div class="content" style="padding-top:18px">
+        <div>
+          <h1 id="search-title">On te prépare des virées…</h1>
+          <p class="subtitle" id="search-sub"></p>
+        </div>
+        <ol class="steps" id="search-steps"></ol>
+        <div class="error-box" id="search-error" hidden></div>
+        <p class="hint" id="search-note">Compte une trentaine de secondes : le serveur d'itinéraires gratuit accepte une demande par seconde.</p>
+        <button class="btn-outline" type="button" id="search-early" disabled>Voir les parcours trouvés</button>
+        <div class="btn-row" id="search-error-actions" hidden>
+          <button class="btn-secondary" type="button" id="search-edit">Modifier</button>
+          <button class="btn-secondary" type="button" id="search-retry">Réessayer</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2b · Liste -->
+  <section class="screen" id="screen-list" aria-labelledby="list-title">
+    <header class="topbar" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div class="title-row">
+        <button class="icon-btn" type="button" id="list-back" aria-label="Retour aux réglages de la sortie"><svg aria-hidden="true"><use href="#i-back"/></svg></button>
+        <h1 id="list-title">Choisis ta virée</h1>
+      </div>
+      <p class="subtitle" id="list-sub" style="margin:0"></p>
+    </header>
+    <div class="scroll">
+      <div class="content" id="route-list"></div>
+    </div>
+  </section>
+
+  <!-- 2c · Détail -->
+  <section class="screen" id="screen-detail" aria-labelledby="detail-title">
+    <div class="map-box detail-map">
+      <div id="detail-map"></div>
+      <button class="map-float round" type="button" id="detail-back" aria-label="Retour à la liste des parcours"><svg aria-hidden="true"><use href="#i-back"/></svg></button>
+    </div>
+    <div class="scroll">
+      <div class="content" style="padding-top:16px">
+        <div>
+          <h1 id="detail-title"></h1>
+          <p class="stat-line" id="detail-stats"></p>
+          <p class="subtitle" id="detail-sub" style="font-size:14px"></p>
+          <p class="warn-line" id="detail-warn" hidden></p>
+        </div>
+        <ol class="timeline" id="detail-timeline"></ol>
+        <p class="updating" id="detail-updating" hidden>Mise à jour du guidage vers les pauses…</p>
+        <button class="btn-primary" type="button" id="detail-go"><svg aria-hidden="true"><use href="#i-play"/></svg>C'est parti</button>
+        <div class="btn-row" style="--cols:3">
+          <button class="btn-secondary" type="button" id="detail-gpx"><svg aria-hidden="true"><use href="#i-download"/></svg>GPX</button>
+          <button class="btn-secondary" type="button" id="detail-sim"><svg aria-hidden="true"><use href="#i-sim"/></svg>Simuler</button>
+          <button class="btn-secondary" type="button" id="detail-others">Autres</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 · Navigation -->
+  <section class="screen nav" id="screen-nav" aria-label="Navigation">
+    <section class="maneuver" aria-live="polite">
+      <div class="man-main">
+        <svg class="man-icon" id="man-icon" viewBox="0 0 24 24" role="img" aria-label=""></svg>
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
+          <span class="man-dist" id="man-dist">—</span>
+          <span class="man-text" id="man-text">Recherche du GPS…</span>
+        </div>
+      </div>
+      <p class="man-street" id="man-street"></p>
+      <div class="man-next" id="man-next" hidden></div>
+    </section>
+    <div class="nav-map">
+      <div id="nav-map"></div>
+      <div class="offroute" id="offroute" hidden>Hors parcours — recalcul…</div>
+      <div class="sim-badge" id="sim-badge" hidden>SIMULATION</div>
+      <div class="nav-tools">
+        <button class="nav-tool" type="button" id="nav-voice" aria-pressed="true" aria-label="Instructions vocales"><svg aria-hidden="true"><use href="#i-volume"/></svg></button>
+        <button class="nav-tool" type="button" id="nav-recenter" aria-label="Recentrer la carte"><svg aria-hidden="true"><use href="#i-target"/></svg></button>
+      </div>
+      <div class="speed" aria-label="Vitesse"><b id="nav-speed">0</b><span>km/h</span></div>
+    </div>
+    <section class="nav-bottom" id="nav-bottom">
+      <div id="nav-main">
+        <div class="nav-stats">
+          <div><b id="nav-eta">—</b><span id="nav-eta-label">arrivée</span></div>
+          <div><b id="nav-left-km">—</b><span>restants</span></div>
+          <div><b id="nav-left-time">—</b><span>de roulage</span></div>
+        </div>
+        <div style="height:12px"></div>
+        <button class="next-stop" type="button" id="nav-next-stop" hidden></button>
+        <div style="height:12px" id="nav-next-gap" hidden></div>
+        <div class="fuel-row">
+          <svg aria-hidden="true"><use href="#i-fuel"/></svg>
+          <div class="grow">
+            <div class="row-between"><span id="nav-fuel">Autonomie —</span><span id="nav-fuel-next"></span></div>
+            <div class="gauge"><i id="nav-fuel-gauge" style="width:50%"></i></div>
+          </div>
+        </div>
+        <div style="height:12px"></div>
+        <div class="btn-row">
+          <button class="nav-btn" type="button" id="nav-options"><svg aria-hidden="true"><use href="#i-menu"/></svg>Options</button>
+          <button class="nav-btn" type="button" id="nav-finish">Terminer</button>
+        </div>
+      </div>
+      <div class="sheet" id="nav-sheet" hidden></div>
+    </section>
+  </section>
+
+  <!-- 3c · Fin -->
+  <section class="screen" id="screen-end" aria-labelledby="end-title">
+    <div class="scroll">
+      <div class="content" style="padding-top:calc(24px + var(--safe-top))">
+        <div>
+          <h1 id="end-title" style="font-size:40px">Belle virée !</h1>
+          <p class="subtitle" id="end-sub"></p>
+        </div>
+        <div class="end-map"><div id="end-map"></div></div>
+        <dl class="stats" id="end-stats"></dl>
+        <div class="btn-row">
+          <button class="btn-secondary" type="button" id="end-gpx"><svg aria-hidden="true"><use href="#i-download"/></svg>Ma trace GPX</button>
+          <button class="btn-secondary" type="button" id="end-route-gpx"><svg aria-hidden="true"><use href="#i-download"/></svg>Parcours GPX</button>
+        </div>
+        <button class="btn-primary" type="button" id="end-new">Nouvelle sortie</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="vendor/leaflet-rotate/leaflet-rotate.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
