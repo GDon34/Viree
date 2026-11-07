@@ -67,6 +67,17 @@ export function buildWorld(seed = 42) {
     if (gx < N - 1 && gy < N - 1 && rand() < 0.25) addEdge(id, id + N + 1);
   }
 
+  // Impasses : routes sans issue de 2 à 4 km, piège classique des demi-tours.
+  const baseCount = nodes.length;
+  for (let i = 0; i < baseCount; i++) {
+    if (rand() > 0.18) continue;
+    const n = nodes[i];
+    const p = destination(n.p, rand() * 360, 2000 + rand() * 2000);
+    nodes.push({ id: nodes.length, p, gx: -1, gy: -1, adj: [], deadEnd: true });
+    addEdge(i, nodes.length - 1);
+    edges[edges.length - 1].residential = true;
+  }
+
   // Points d'intérêt.
   let osmId = 1000;
   const interest = [];
@@ -126,9 +137,11 @@ export function buildWorld(seed = 42) {
 
 // --- Routage (Dijkstra) -----------------------------------------------------
 
-function snap(world, p) {
+function snap(world, p, filter = null) {
   let best = { d: Infinity };
+  const noResidential = filter && filter.min_road_class && filter.min_road_class !== 'residential' && filter.min_road_class !== 'service_other';
   for (const e of world.edges) {
+    if (noResidential && e.residential) continue;
     // pré-filtre grossier
     if (haversine(p, e.pts[Math.floor(e.pts.length / 2)]) > e.len / 2 + 12000) continue;
     for (let i = 0; i < e.pts.length; i++) {
@@ -146,7 +159,7 @@ function subLen(pts, i0, i1) {
 }
 
 // Plus court chemin (en temps) entre deux points accrochés au réseau.
-function shortest(world, s, t) {
+function shortest(world, s, t, departDir = 0) {
   const { nodes, edges } = world;
   // Arcs virtuels depuis/vers les points accrochés.
   const startArcs = []; // vers les nœuds a et b de l'arête de départ
@@ -156,8 +169,9 @@ function shortest(world, s, t) {
     const len = subLen(pts, 0, pts.length - 1);
     return { pts, len, time: len * e.time / e.len, name: e.name };
   };
-  startArcs.push({ node: se.a, arc: mk(se, s.i, 0) });
-  startArcs.push({ node: se.b, arc: mk(se, s.i, se.pts.length - 1) });
+  // departDir : +1 = repartir vers b, -1 = repartir vers a, 0 = libre
+  if (departDir <= 0) startArcs.push({ node: se.a, arc: mk(se, s.i, 0) });
+  if (departDir >= 0) startArcs.push({ node: se.b, arc: mk(se, s.i, se.pts.length - 1) });
   const endArcs = new Map();
   endArcs.set(te.a, mk(te, 0, t.i));
   endArcs.set(te.b, mk(te, te.pts.length - 1, t.i));
@@ -170,7 +184,7 @@ function shortest(world, s, t) {
     if (sa.arc.time < dist[sa.node]) { dist[sa.node] = sa.arc.time; prev[sa.node] = { arc: sa.arc, from: -1 }; queue.push(sa.node); }
   }
   let best = Infinity, bestEnd = null;
-  if (se === te) {
+  if (se === te && (departDir === 0 || Math.sign(t.i - s.i) === departDir || t.i === s.i)) {
     const direct = mk(se, s.i, t.i);
     best = direct.time; bestEnd = { direct };
   }
@@ -228,13 +242,25 @@ function arcBearing(pts, fromEnd) {
 
 export function mockRoute(world, req) {
   const locs = req.locations;
-  const snaps = locs.map((l) => snap(world, [l.lat, l.lon]));
+  const snaps = locs.map((l) => snap(world, [l.lat, l.lon], l.search_filter));
   if (snaps.some((s) => !s.e || s.d > 15000)) return { status: 400, body: { error_code: 171, error: 'No suitable edges near location', status_code: 400 } };
   const legs = [];
   let legArcs = [];
   const legLocs = [];
+  let arriveDir = 0; // sens d'arrivée sur l'arête du point précédent
   for (let k = 0; k < locs.length - 1; k++) {
-    const arcs = shortest(world, snaps[k], snaps[k + 1]);
+    const through = k > 0 && locs[k].type === 'through';
+    const arcs = shortest(world, snaps[k], snaps[k + 1], through ? arriveDir : 0);
+    // Sens d'arrivée sur le point suivant : on compare la fin du dernier arc à l'arête accrochée.
+    if (arcs && arcs.length) {
+      const last = arcs[arcs.length - 1];
+      const e = snaps[k + 1].e;
+      const end = last.pts[last.pts.length - 1];
+      const prev = last.pts[Math.max(0, last.pts.length - 2)];
+      const ia = e.pts.indexOf(e.pts.reduce((b, q) => (haversine(q, prev) < haversine(b, prev) ? q : b), e.pts[0]));
+      arriveDir = ia <= snaps[k + 1].i ? 1 : -1;
+      void end;
+    }
     if (!arcs) return { status: 400, body: { error_code: 442, error: 'No path could be found for input', status_code: 400 } };
     legArcs.push(...arcs.filter((a) => a.pts.length > 1));
     const isBreak = (locs[k + 1].type || 'break') === 'break' || k + 1 === locs.length - 1;
@@ -287,13 +313,32 @@ export function mockRoute(world, req) {
   };
 }
 
+// Classes de route le long d'un tracé (imite trace_attributes).
+const CLASS_OF = { main: 'primary', country: 'secondary', twisty: 'tertiary' };
+function mockTraceAttributes(world, req) {
+  const pts = req.shape.map((p) => [p.lat, p.lon]);
+  const edges = [];
+  for (let i = 1; i < pts.length; i++) {
+    const mid = [(pts[i - 1][0] + pts[i][0]) / 2, (pts[i - 1][1] + pts[i][1]) / 2];
+    let best = null, bd = Infinity;
+    for (const e of world.edges) {
+      const c = e.pts[Math.floor(e.pts.length / 2)];
+      if (haversine(mid, c) > e.len / 2 + 2000) continue;
+      for (let k = 0; k < e.pts.length; k += 3) { const d = haversine(mid, e.pts[k]); if (d < bd) { bd = d; best = e; } }
+    }
+    const cls = best ? (best.cls === 'country' && best.id % 2 ? 'tertiary' : CLASS_OF[best.cls]) : 'unclassified';
+    edges.push({ road_class: cls, length: haversine(pts[i - 1], pts[i]) / 1000 });
+  }
+  return { edges, units: 'kilometers' };
+}
+
 // --- Interception de fetch ---------------------------------------------------
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-export function installMock(target = globalThis, { seed = 42, latency = 60, log = null } = {}) {
+export function installMock(target = globalThis, { seed = 42, latency = 60, log = null, rejectScooter = false } = {}) {
   const world = buildWorld(seed);
   const realFetch = target.fetch.bind(target);
   const stats = { valhalla: 0, overpass: 0, photon: 0 };
@@ -301,10 +346,19 @@ export function installMock(target = globalThis, { seed = 42, latency = 60, log 
     const url = typeof input === 'string' ? input : input.url;
     const wait = () => new Promise((r) => setTimeout(r, latency * (0.5 + Math.random())));
     if (init.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (url.startsWith('https://valhalla1.openstreetmap.de/trace_attributes')) {
+      stats.valhalla++;
+      await wait();
+      const req = JSON.parse(String(init.body));
+      return json(mockTraceAttributes(world, req));
+    }
     if (url.startsWith('https://valhalla1.openstreetmap.de/route')) {
       stats.valhalla++;
       await wait();
       const req = JSON.parse(new URL(url).searchParams.get('json'));
+      stats.costings = stats.costings || {};
+      stats.costings[req.costing] = (stats.costings[req.costing] || 0) + 1;
+      if (rejectScooter && req.costing === 'motor_scooter') return json({ error_code: 125, error: "No costing method found for 'motor_scooter'", status_code: 400 }, 400);
       const res = mockRoute(world, req);
       if (log) log('valhalla', req.locations.length, res.status);
       return json(res.body, res.status);

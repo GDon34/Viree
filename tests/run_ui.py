@@ -43,7 +43,7 @@ try:
         wait_search_done(page)
         page.wait_for_timeout(300)
         n1 = page.locator('#route-list article').count()
-        print('  parcours affichés :', n1, page.locator('.route-name').all_inner_texts())
+        print('  parcours affichés :', n1, page.locator('.route-name').all_inner_texts(), '| bilan :', page.inner_text('#list-stats'))
         shot(page, '03-liste-finie')
 
         # Pouce bas + annulation, puis pouce bas définitif, puis pouce haut

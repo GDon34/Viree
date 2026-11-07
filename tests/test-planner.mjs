@@ -38,7 +38,7 @@ function run(params, memory = {}, label = '') {
 
 const base = { mode: 'loop', start, durationMin: 180, discovery: 0.6, fuelKm: 140, settings, departure: new Date('2026-11-08T09:30:00') };
 const r1 = await run(base);
-console.log(`\nBOUCLE 3 h, 60 % → ${r1.info.total} parcours, ${r1.s.stats.computed} calculés (${r1.ms} ms), stats`, r1.info.stats);
+console.log(`\nBOUCLE 3 h, 60 % → ${r1.info.total} parcours, ${r1.s.stats.computed} calculés (${r1.ms} ms), stats`, JSON.stringify(r1.info.stats), 'profils', JSON.stringify(globalThis.__mockStats.costings));
 console.log('  étapes (extraits) :', r1.steps.slice(0, 4).concat(r1.steps.slice(-2)));
 for (const o of r1.s.options) {
   console.log(` - ${o.name} [${o.badge?.label || '-'}]${o.best ? ' ★' : ''} ${(o.route.timeS / 60).toFixed(0)} min, ${(o.route.totalM / 1000).toFixed(0)} km, virages ${o.metrics.curvRating}/5, pauses ${o.stops.length}${o.fuelWarning ? ' ! ' + o.fuelWarning.message : ''}`);
@@ -64,6 +64,12 @@ for (const d of [0, 0.5, 1]) {
   console.log(`\nA→B ${d * 100} % : rapide ${(r.s.ctx.fastS / 60).toFixed(0)} min, visé ${(r.s.ctx.targetS / 60).toFixed(0)} min → ${r.info.total} parcours :`, r.s.options.map((o) => `${o.name} ${(o.route.timeS / 60).toFixed(0)} min`).join(' | '));
 }
 
+import { retraceInfo, hasUTurn } from '../js/planner.js';
+import { roadClassShare } from '../js/services.js';
+const bad = r1.s.options.filter((o) => hasUTurn(retraceInfo(o.route, 'loop')));
+console.log('\nparcours proposés avec demi-tour :', bad.length);
+const share = await roadClassShare(r1.s.options[0].route.shape);
+console.log('part de petites routes (simulée) :', Math.round(share.small * 100) + ' %', JSON.stringify(Object.fromEntries(Object.entries(share.byClass).map(([k, v]) => [k, Math.round(v)]))));
 const opt = r1.s.options[0];
 const r4 = await routeWithStops(opt, settings);
 console.log(`\nAvec pauses : ${r4.legs.length} étapes ; ${r4.maneuvers.length} manœuvres`);

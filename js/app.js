@@ -7,7 +7,7 @@ import {
   saveLiked, deleteLiked, listLiked, loadPrefs, resetPrefs, loadVotes, clearVotes, learn, recordVote,
   exclusionSets, TASTES,
 } from './store.js';
-import { route as fetchRoute, searchPlaces, AbortedError, setRateGap, timeAt } from './services.js';
+import { route as fetchRoute, searchPlaces, AbortedError, setRateGap, timeAt, roadClassShare } from './services.js';
 import { createMap, setTheme, routeLayer, markerIcon, stopMarker, meIcon, aheadCenter, thumbSvg } from './map.js';
 import { NavEngine } from './navigator.js';
 import { Simulator } from './sim.js';
@@ -383,6 +383,7 @@ async function startSearch() {
   $('#list-msg').hidden = true;
   $('#list-error-actions').hidden = true;
   $('#list-more').hidden = true;
+  $('#list-stats').hidden = true;
   setProgress(true, 'Préparation…', 0.03, '');
   S.history = ['screen-home', 'screen-list'];
   show('screen-list', { push: false });
@@ -468,6 +469,16 @@ function searchDone(info) {
       msg.textContent = 'Plus de nouveaux parcours différents avec ces réglages.';
     }
   }
+  const parts = [];
+  if (st.rejectedUturn) parts.push(`${st.rejectedUturn} avec demi-tour`);
+  if (st.rejectedSimilar) parts.push(`${st.rejectedSimilar} trop proche${st.rejectedSimilar > 1 ? 's' : ''} d'un autre`);
+  if (st.rejectedQuality) parts.push(`${st.rejectedQuality} hors durée`);
+  if (st.rejectedRide) parts.push(`${st.rejectedRide} déjà fait${st.rejectedRide > 1 ? 's' : ''}`);
+  if (st.rejectedDown) parts.push(`${st.rejectedDown} refusé${st.rejectedDown > 1 ? 's' : ''}`);
+  if (st.failures) parts.push(`${st.failures} sans itinéraire`);
+  const ls = $('#list-stats');
+  ls.hidden = false;
+  ls.textContent = `${st.computed} parcours calculés, ${session.options.length} retenus` + (parts.length ? ` · écartés : ${parts.join(', ')}.` : '.');
   $('#list-more').hidden = session.options.length === 0 || (info.added === 0 && !session.reference) || (session.reference && session.d === 0);
   $('#list-more').disabled = false;
   $('#list-more').textContent = 'Charger d\'autres parcours';
@@ -605,6 +616,7 @@ function renderDetail() {
   $('#detail-stats').innerHTML = `<b>${fmtDuration(r.timeS / 60)}</b> de roulage${pauseS ? ` + ${fmtDuration(pauseS / 60)} de pauses` : ''} · <b>${Math.round(r.totalM / 1000)} km</b>`;
   const ret = new Date(Date.now() + (r.timeS + pauseS) * 1000);
   const bits = [`Virages ${m.curvRating}/5`, `${m.panoramaCount} panorama${m.panoramaCount > 1 ? 's' : ''}`];
+  if (o.smallShare != null) bits.push(`petites routes ${Math.round(o.smallShare * 100)} %`);
   if (m.highest) bits.push(`point culminant ${m.highest.name} ${m.highest.ele.toLocaleString('fr-FR')} m`);
   bits.push((o.mode === 'loop' ? 'retour' : 'arrivée') + ' vers ' + fmtClock(ret));
   $('#detail-sub').textContent = bits.join(' · ');
@@ -682,6 +694,14 @@ async function openDetail(option, { fromHistory = false } = {}) {
     }
   }
   busy(false);
+  // Part réelle de petites routes (une requête, en arrière-plan).
+  if (option.smallShare == null && !option.smallShareTried) {
+    option.smallShareTried = true;
+    roadClassShare(option.route.shape).then((res) => {
+      option.smallShare = res.small;
+      if (S.option === option) renderDetail();
+    }).catch(() => {});
+  }
 }
 
 // --- Navigation (écran 3) -----------------------------------------------------

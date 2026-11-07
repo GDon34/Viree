@@ -2,7 +2,7 @@
 // - Valhalla (FOSSGIS) pour les itinéraires, limité à 1 requête par seconde
 // - Overpass pour les points d'intérêt
 // - Photon (komoot) pour la recherche d'adresses
-import { decodePolyline, cumulative } from './geo.js';
+import { decodePolyline, cumulative, simplify } from './geo.js';
 
 export const ENDPOINTS = {
   valhalla: 'https://valhalla1.openstreetmap.de/route',
@@ -63,8 +63,44 @@ export function costingOptions(settings, extra = {}) {
   };
 }
 
+// Profil d'itinéraire. « Petites routes » : profil scooter de Valhalla, qui sait éviter
+// les routes principales (réglage use_primary), avec une vitesse max de moto de balade.
+export function routingProfile(settings, discovery = 0.5) {
+  if (settings.smallRoads === false) return { costing: 'motorcycle' };
+  const strength = 0.4 + 0.6 * Math.max(0, Math.min(1, discovery));
+  return {
+    costing: 'motor_scooter',
+    options: {
+      top_speed: 90,
+      use_primary: +(0.5 * (1 - strength)).toFixed(2),
+      use_hills: 0.6,
+      use_ferry: settings.avoid?.ferries ? 0 : 0.5,
+      use_tolls: settings.avoid?.tolls ? 0 : 0.5,
+      exclude_unpaved: !!settings.avoid?.unpaved,
+    },
+  };
+}
+
 // locations : [{lat, lon, type: 'break'|'through'|'via', heading?}]
-export async function route(locations, settings, { signal, costing = {}, alternates = 0 } = {}) {
+// profile : { costing: 'motorcycle' | 'motor_scooter', options } (moto par défaut)
+export async function route(locations, settings, { signal, costing = {}, alternates = 0, profile = null } = {}) {
+  if (profile && profile.costing === 'motor_scooter') {
+    try {
+      const r = await routeOnce(locations, settings, { signal, costing, alternates, profile });
+      return r;
+    } catch (e) {
+      // Repli sur le profil moto si le profil petites routes échoue (sauf réseau ou annulation).
+      if (e instanceof AbortedError || (e instanceof RouteError && (e.code === 'network' || e.code === 429))) throw e;
+    }
+  }
+  return routeOnce(locations, settings, { signal, costing, alternates, profile: { costing: 'motorcycle' } });
+}
+
+async function routeOnce(locations, settings, { signal, costing = {}, alternates = 0, profile }) {
+  const costingName = profile?.costing || 'motorcycle';
+  const costingOpts = costingName === 'motorcycle'
+    ? costingOptions(settings, costing)
+    : { ...profile.options, ...costing };
   const body = {
     locations: locations.map((l) => {
       const o = { lat: +l.lat.toFixed(6), lon: +l.lon.toFixed(6), type: l.type || 'break' };
@@ -73,8 +109,8 @@ export async function route(locations, settings, { signal, costing = {}, alterna
       if (l.filter) o.search_filter = l.filter;
       return o;
     }),
-    costing: 'motorcycle',
-    costing_options: { motorcycle: costingOptions(settings, costing) },
+    costing: costingName,
+    costing_options: { [costingName]: costingOpts },
     directions_options: { units: 'kilometers', language: 'fr-FR' },
     id: 'viree-gps',
   };
@@ -98,6 +134,7 @@ export async function route(locations, settings, { signal, costing = {}, alterna
     }
     const out = [normalizeTrip(data.trip)];
     for (const alt of data.alternates || []) if (alt.trip) out.push(normalizeTrip(alt.trip));
+    for (const r of out) r.profile = costingName;
     return alternates ? out : out[0];
   });
 }
@@ -204,6 +241,39 @@ export function alongAtTime(r, tSec) {
   const dt = cumTime[hi] - cumTime[lo];
   const f = dt > 0 ? (tSec - cumTime[lo]) / dt : 0;
   return cum[lo] + f * (cum[hi] - cum[lo]);
+}
+
+// Part de petites routes d'un tracé (classes de route OpenStreetMap, via Valhalla trace_attributes).
+const SMALL_CLASSES = new Set(['tertiary', 'unclassified', 'residential', 'service_other', 'service', 'living_street', 'track']);
+export async function roadClassShare(shape, { signal } = {}) {
+  let pts = simplify(shape, 15);
+  if (pts.length > 4000) { const k = Math.ceil(pts.length / 4000); pts = pts.filter((_, i) => i % k === 0 || i === pts.length - 1); }
+  const body = {
+    shape: pts.map(([lat, lon]) => ({ lat: +lat.toFixed(6), lon: +lon.toFixed(6) })),
+    costing: 'auto',
+    shape_match: 'map_snap',
+    filters: { attributes: ['edge.road_class', 'edge.length'], action: 'include' },
+  };
+  return valhallaQueue.run(async () => {
+    const t = timed(signal, 30000);
+    try {
+      // text/plain : requête « simple », sans pré-vérification CORS.
+      const res = await fetch(ENDPOINTS.valhalla.replace(/route$/, 'trace_attributes'), {
+        method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(body), signal: t.signal,
+      });
+      const data = await res.json();
+      if (!res.ok || !data.edges) throw new Error('trace_attributes ' + res.status);
+      let small = 0, total = 0;
+      const byClass = {};
+      for (const e of data.edges) {
+        const len = e.length || 0;
+        total += len;
+        byClass[e.road_class] = (byClass[e.road_class] || 0) + len;
+        if (SMALL_CLASSES.has(e.road_class)) small += len;
+      }
+      return { small: total ? small / total : 0, byClass, totalKm: total };
+    } finally { t.done(); }
+  });
 }
 
 // --- Overpass ---------------------------------------------------------------

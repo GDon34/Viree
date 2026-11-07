@@ -192,6 +192,10 @@
             <label class="check"><input type="checkbox" data-avoid="ferries"> Ferries</label>
             <label class="check"><input type="checkbox" data-avoid="unpaved"> Non goudronné</label>
           </div>
+          <div class="set-list">
+            <label class="set-row"><span class="grow">Préférer les petites routes <span class="badge" style="margin-left:4px">expérimental</span></span><input type="checkbox" data-setting="smallRoads"></label>
+          </div>
+          <p class="hint">Petites routes : itinéraires calculés avec un profil qui évite les axes principaux, d'autant plus que le degré de découverte est élevé.</p>
         </section>
         <section class="set-section">
           <h2 class="label" style="margin:0">Guidage</h2>
@@ -242,6 +246,7 @@
           <span class="progress-meta" id="list-meta"></span>
         </div>
         <div id="route-list" class="route-list"></div>
+        <p class="hint" id="list-stats" hidden></p>
         <div class="error-box" id="list-msg" hidden></div>
         <div class="btn-row" id="list-error-actions" hidden>
           <button class="btn-secondary" type="button" id="list-edit">Modifier</button>

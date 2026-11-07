@@ -10,6 +10,7 @@ export const DEFAULTS = {
   avoid: { highways: true, tolls: true, ferries: false, unpaved: true },
   voice: true,
   theme: 'auto',
+  smallRoads: true,
   // Dernières saisies
   mode: 'loop',
   durationMin: 180,

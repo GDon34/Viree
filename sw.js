@@ -1,5 +1,5 @@
 // Service worker : l'appli s'ouvre même sans réseau, et les fonds de carte déjà vus restent en cache.
-const VERSION = 'viree-v3';
+const VERSION = 'viree-v4';
 const APP = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/geo.js', 'js/services.js', 'js/planner.js', 'js/stops.js', 'js/names.js',

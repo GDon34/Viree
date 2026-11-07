@@ -3,9 +3,9 @@
 // on les fait calculer par Valhalla, on les note, et on garde les meilleurs.
 import {
   haversine, bearing, destination, angleDiff, resample, bbox, rng, hashString, cellKey,
-  nearestOnLine,
+  nearestOnLine, projectOnSegment,
 } from './geo.js';
-import { route, overpass, elementPoint, RouteError, AbortedError } from './services.js';
+import { route, overpass, elementPoint, RouteError, AbortedError, routingProfile } from './services.js';
 import { fetchStopPois, placeStops } from './stops.js';
 import { nameFor, assignBadges } from './names.js';
 import { cellsOfShape, coverage } from './store.js';
@@ -76,7 +76,8 @@ async function fetchInterest(area, signal) {
 
 // --- Fabrication des candidats ----------------------------------------------
 
-const WAYPOINT_FILTER = { min_road_class: 'unclassified', max_road_class: 'primary' };
+// Points de passage accrochés à de petites routes (ni grands axes, ni impasses résidentielles).
+const WAYPOINT_FILTER = { min_road_class: 'unclassified', max_road_class: 'tertiary' };
 
 const LOOP_BEARINGS = [0, 180, 90, 270, 45, 225, 135, 315, 22, 202, 112, 292];
 
@@ -263,12 +264,66 @@ export function analyzeRoute(r, interestPois, mode) {
   };
 }
 
+// Demi-tours et tronçons parcourus deux fois. Pour une boucle, on tolère jusqu'à
+// `sharedEndsM` de route commune entre le début et la fin (quitter la maison et y revenir).
+export function retraceInfo(r, mode, sharedEndsM = 10000) {
+  const step = 25;
+  const pts = resample(r.shape, r.cum, step);
+  const total = (pts.length - 1) * step;
+  const cell = 40;
+  const grid = new Map();
+  const keyOf = (p) => {
+    const y = Math.floor((p[0] * 111320) / cell);
+    const x = Math.floor((p[1] * 111320 * Math.cos(p[0] * Math.PI / 180)) / cell);
+    return [x, y];
+  };
+  const keys = pts.map(keyOf);
+  const retraced = new Uint8Array(pts.length);
+  for (let i = 0; i < pts.length; i++) {
+    const [x, y] = keys[i];
+    const along = i * step;
+    let hit = false;
+    for (let dx = -1; dx <= 1 && !hit; dx++) for (let dy = -1; dy <= 1 && !hit; dy++) {
+      const list = grid.get((x + dx) + ':' + (y + dy));
+      if (!list) continue;
+      for (const j of list) {
+        if (along - j * step < 400) continue;
+        // Même route = quasiment sur le même tracé (quelques mètres) ; des lacets voisins restent à 20 m et plus.
+        let dmin = Infinity;
+        if (j > 0) dmin = Math.min(dmin, projectOnSegment(pts[i], pts[j - 1], pts[j]).dist);
+        if (j < pts.length - 1) dmin = Math.min(dmin, projectOnSegment(pts[i], pts[j], pts[j + 1]).dist);
+        if (dmin > 8) continue;
+        const sharedEnds = mode === 'loop' && along >= total - sharedEndsM && j * step <= sharedEndsM;
+        if (!sharedEnds) { hit = true; break; }
+      }
+    }
+    if (hit) retraced[i] = 1;
+    const k = x + ':' + y;
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  let maxRun = 0, run = 0, retracedM = 0, runEnd = -1;
+  for (let i = 0; i < pts.length; i++) {
+    if (retraced[i]) { run += step; retracedM += step; if (run > maxRun) { maxRun = run; runEnd = i; } } else run = 0;
+  }
+  const uTurnMan = r.maneuvers.filter((m) => m.type === 12 || m.type === 13);
+  // Endroit du demi-tour : bout de l'aller-retour le plus long, ou manœuvre de demi-tour.
+  let point = null;
+  if (runEnd >= 0) point = pts[Math.max(0, runEnd - Math.round(maxRun / step))];
+  else if (uTurnMan.length) point = r.shape[uTurnMan[0].begin];
+  return { maxRun, retracedM, ratio: total ? retracedM / total : 0, uTurns: uTurnMan.length, point };
+}
+
+export function hasUTurn(info) {
+  return info.uTurns > 0 || info.maxRun > 300 || info.ratio > 0.03;
+}
+
 export function scoreRoute(m, r, ctx) {
   const d = ctx.discovery;
   const curvN = Math.min(1, m.degPerKm / 160);
   const panoN = Math.min(1, m.panoramaScore / 8);
   const manN = Math.min(1, m.manDensity / 8);
-  const fun = 0.6 * curvN + 0.4 * panoN;
+  const fun = (0.55 + 0.3 * d) * curvN + (0.45 - 0.3 * d) * panoN + 0.3 * d * curvN;
   const calm = 1 - manN;
   let s = d * fun + (1 - d) * (0.3 + 0.7 * calm) * 0.6 + 0.15 * calm;
   s -= m.overlap * 1.5;
@@ -328,7 +383,8 @@ export class PlanSession {
     this.scale = 1;
     this.usedNames = new Set();
     this.pendingStops = [];
-    this.stats = { computed: 0, rejectedRide: 0, rejectedDown: 0, rejectedSimilar: 0, rejectedQuality: 0, failures: 0 };
+    this.stats = { computed: 0, rejectedRide: 0, rejectedDown: 0, rejectedSimilar: 0, rejectedQuality: 0, rejectedUturn: 0, failures: 0 };
+    this.profile = routingProfile(params.settings, this.d);
     this.running = false;
     this.stopRequested = false;
     this.pois = [];
@@ -379,7 +435,7 @@ export class PlanSession {
       this.finishRun(0);
       return;
     }
-    await this.run(24, 8);
+    await this.run(32, 8);
   }
 
   async more() {
@@ -387,7 +443,7 @@ export class PlanSession {
     this.stopRequested = false;
     // Pour « plus », on élargit un peu les variantes.
     this.moreRounds = (this.moreRounds || 0) + 1;
-    await this.run(12, 8);
+    await this.run(16, 8);
   }
 
   nextCandidate() {
@@ -427,7 +483,7 @@ export class PlanSession {
         const end = p.mode === 'loop' ? p.start : p.end;
         locs.push({ lat: end[0], lon: end[1] });
         try {
-          cand.route = await route(locs, p.settings, { signal: this.signal });
+          cand.route = await route(locs, p.settings, { signal: this.signal, profile: this.profile });
           netFailures = 0;
           // Calibrage progressif sur la durée visée.
           const ratio = cand.route.timeS / this.ctx.targetS;
@@ -436,7 +492,32 @@ export class PlanSession {
             const extra = (cand.route.timeS - this.ctx.fastS) / Math.max(60, this.ctx.targetS - this.ctx.fastS);
             this.scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / Math.max(0.2, extra))), 0.5);
           }
-          if (this.consider(cand)) added++;
+          this.lastReject = null;
+          let ok = this.consider(cand);
+          // Réparation : on retire le point de passage qui provoque le demi-tour et on recalcule une fois.
+          const minLeft = p.mode === 'loop' ? 2 : 1;
+          if (!ok && this.lastReject?.why === 'uturn' && this.lastReject.info.point && cand.waypoints.length > minLeft) {
+            const at = this.lastReject.info.point;
+            let k = 0;
+            cand.waypoints.forEach((w, j) => { if (haversine(w, at) < haversine(cand.waypoints[k], at)) k = j; });
+            if (haversine(cand.waypoints[k], at) < 8000) {
+              cand.waypoints = cand.waypoints.filter((_, j) => j !== k);
+              const locs2 = [{ lat: p.start[0], lon: p.start[1] }];
+              for (const w of cand.waypoints) locs2.push({ lat: w[0], lon: w[1], type: 'through', filter: WAYPOINT_FILTER });
+              locs2.push({ lat: end[0], lon: end[1] });
+              this.step(`Parcours ${num} : correction d'un demi-tour…`);
+              try {
+                cand.route = await route(locs2, p.settings, { signal: this.signal, profile: this.profile });
+                this.stats.repairs = (this.stats.repairs || 0) + 1;
+                this.lastReject = null;
+                ok = this.consider(cand);
+              } catch (e2) {
+                if (e2 instanceof AbortedError) throw e2;
+              }
+            }
+          }
+          if (!ok && this.lastReject?.why === 'uturn') this.stats.rejectedUturn++;
+          if (ok) added++;
         } catch (e) {
           if (e instanceof AbortedError) throw e;
           if (e instanceof RouteError && (e.code === 'network' || e.code === 429)) {
@@ -466,8 +547,11 @@ export class PlanSession {
     const m = analyzeRoute(r, this.pois, this.params.mode);
     const ratio = r.timeS / this.ctx.targetS;
     if (!cand.isReference) {
-      const badDuration = this.params.mode === 'loop' ? (ratio < 0.7 || ratio > 1.3) : (r.timeS > this.ctx.maxS * 1.05);
-      if (badDuration || m.overlap > 0.3) { this.stats.rejectedQuality++; return false; }
+      const badDuration = this.params.mode === 'loop' ? (ratio < 0.75 || ratio > 1.2) : (r.timeS > this.ctx.maxS * 1.05);
+      if (badDuration) { this.stats.rejectedQuality++; return false; }
+      // Zéro demi-tour : on écarte tout parcours qui revient sur ses pas.
+      const rt = retraceInfo(r, this.params.mode);
+      if (hasUTurn(rt)) { this.lastReject = { why: 'uturn', info: rt }; return false; }
     }
     const cells = cellsOfShape(r.shape);
     if (!ignoreHistory) {
@@ -500,6 +584,7 @@ export class PlanSession {
       stops: [],
       stopsReady: false,
       isReference: !!cand.isReference,
+      profile: r.profile === 'motor_scooter' ? this.profile : null,
     };
     option.name = nameFor(option, this.params.mode, this.rand, this.usedNames);
     this.usedNames.add(option.name);
@@ -568,7 +653,7 @@ export async function routeWithStops(option, settings, { signal } = {}) {
   }
   items.sort((a, b) => a.along - b.along);
   const locs = [{ lat: option.start[0], lon: option.start[1] }, ...items, { lat: option.end[0], lon: option.end[1] }];
-  const r = await route(locs, settings, { signal });
+  const r = await route(locs, settings, { signal, profile: option.profile || null });
   // Chaque pause correspond à la fin d'une étape (leg).
   const stopsOrdered = items.filter((it) => it.stop).map((it) => it.stop);
   stopsOrdered.forEach((s, k) => {

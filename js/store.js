@@ -73,6 +73,8 @@ export function packOption(o) {
       legs: r.legs, timeS: r.timeS, lengthKm: r.lengthKm,
     },
     withStops: !!o.withStops,
+    profile: o.profile || null,
+    smallShare: o.smallShare ?? null,
   };
 }
 

@@ -115,6 +115,7 @@ export class NavEngine {
     }
 
     this.checkStops(p);
+    this.prevAlong = this.along;
     this.checkArrival(p);
     if (!this.finished && !this.offRoute) this.announce();
     this.hooks.onUpdate?.(this.state());
@@ -188,7 +189,9 @@ export class NavEngine {
         this.hooks.onSpeak?.(`Dans ${spokenDist(Math.max(100, ahead))}, ${lowerFirst(s.label)} : ${s.name}.`);
       }
     }
-    const atStop = haversine(p, s.point) < 70 || (ahead < -20 && haversine(p, s.routePoint || s.point) < 120);
+    // Arrivé : tout près du lieu, ou on vient de dépasser son point sur le parcours (GPS qui « saute »).
+    const crossed = this.prevAlong != null && this.prevAlong < s.along && this.along >= s.along - 30;
+    const atStop = haversine(p, s.point) < 70 || crossed || (ahead < -20 && haversine(p, s.routePoint || s.point) < 120);
     if (s.state === 'accepted' && atStop) {
       s.state = 'paused';
       this.pausedAt = Date.now();
@@ -196,7 +199,7 @@ export class NavEngine {
       return;
     }
     // Pause dépassée sans réponse (ou refusée) : on passe à la suivante.
-    if ((s.state === 'prompted' || s.state === 'accepted') && ahead < -400) {
+    if (s.state === 'prompted' && ahead < -400) {
       s.state = 'skipped';
       this.activeStop = null;
       this.hooks.onStopPrompt?.(null);
@@ -315,7 +318,7 @@ export class NavEngine {
       const fresh = await fetchRoute([
         { lat: p[0], lon: p[1], heading },
         { lat: target[0], lon: target[1] },
-      ], this.settings, {});
+      ], this.settings, { profile: this.option.profile || null });
       this.spliceRoute(fresh, joinAlong);
       this.reroutes++;
       this.offRoute = false;
