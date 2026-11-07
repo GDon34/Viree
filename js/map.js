@@ -5,8 +5,26 @@ import { destination } from './geo.js';
 // Fonds OpenStreetMap standard (sans clé). Le thème nuit est obtenu par un filtre CSS.
 const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const ATTRIB = '© <a href="https://www.openstreetmap.org/copyright">contributeurs OpenStreetMap</a>';
+// Fond topographique (pistes, courbes de niveau) pour le tout-terrain.
+const TOPO_URL = 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png';
+const TOPO_ATTRIB = 'Carte © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA), données © <a href="https://www.openstreetmap.org/copyright">contributeurs OpenStreetMap</a>, SRTM';
 
-export function createMap(el, { rotate = false, theme = 'day', interactive = true } = {}) {
+function tileLayer(kind) {
+  return kind === 'topo'
+    ? L.tileLayer(TOPO_URL, { maxZoom: 19, maxNativeZoom: 17, subdomains: 'abc', attribution: TOPO_ATTRIB, crossOrigin: true })
+    : L.tileLayer(TILE_URL, { maxZoom: 19, attribution: ATTRIB, crossOrigin: true });
+}
+
+export function setTiles(map, kind) {
+  if (!map || map._tilesKind === kind) return;
+  if (map._tiles) map._tiles.remove();
+  map._tiles = tileLayer(kind).addTo(map);
+  map._tiles.bringToBack();
+  map._tilesKind = kind;
+  map.getContainer().classList.toggle('map-topo', kind === 'topo');
+}
+
+export function createMap(el, { rotate = false, theme = 'day', interactive = true, tiles = 'osm' } = {}) {
   const opts = {
     zoomControl: false,
     attributionControl: true,
@@ -22,7 +40,7 @@ export function createMap(el, { rotate = false, theme = 'day', interactive = tru
   if (rotate) Object.assign(opts, { rotate: true, touchRotate: false, shiftKeyRotate: false, pitchDrag: false, bearing: 0 });
   const map = L.map(el, opts);
   map.attributionControl.setPrefix(false);
-  map._tiles = L.tileLayer(TILE_URL, { maxZoom: 19, attribution: ATTRIB, crossOrigin: true }).addTo(map);
+  setTiles(map, tiles);
   setTheme(map, theme);
   return map;
 }

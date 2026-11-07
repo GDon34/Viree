@@ -5,7 +5,9 @@ import {
   haversine, bearing, destination, angleDiff, resample, bbox, rng, hashString, cellKey,
   nearestOnLine, projectOnSegment,
 } from './geo.js';
-import { route, overpass, elementPoint, RouteError, AbortedError, routingProfile } from './services.js';
+import { route, overpass, elementPoint, RouteError, AbortedError, routingProfile, traceEdges, wayTags, tracksInArea, finalizeRoute, traceRoute, joinRoutes, sliceRoute, timeAt } from './services.js';
+import { offroadProfile, maxGradeFor, analyzeOffroad, offroadScore, isOffroadEdge, gradeOf, legalityOf, tetIndex } from './offroad.js';
+import { tetSectionsNear, tetLoopCandidate, tetBackPoint } from './traces.js';
 import { fetchStopPois, placeStops } from './stops.js';
 import { nameFor, assignBadges } from './names.js';
 import { cellsOfShape, coverage } from './store.js';
@@ -146,6 +148,52 @@ function straightLen(A, pts, B) {
   let s = 0, prev = A;
   for (const p of pts) { s += haversine(prev, p); prev = p; }
   return s + haversine(prev, B);
+}
+
+// Boucle tout-terrain : plus de points de passage (3 à 8), chacun accroché à une piste.
+export function offroadLoopCandidate(i, start, targetS, share, tracks, scale, rand) {
+  const v = (1 - share) * 14 + share * 7; // m/s
+  const L = targetS * v * scale;
+  const P = L / 1.35;
+  const n = Math.max(3, Math.min(8, Math.round(3 + 6 * share)));
+  const k = n + 1;
+  const polyFactor = Math.sin(Math.PI / k) / (Math.PI / k);
+  const r = P / (2 * Math.PI * polyFactor);
+  const theta = (LOOP_BEARINGS[i % LOOP_BEARINGS.length] + (rand() - 0.5) * 30 + 360) % 360;
+  const center = destination(start, theta, r);
+  const startAngle = (theta + 180) % 360;
+  const dir = i % 4 < 2 ? 1 : -1;
+  const used = new Set();
+  const waypoints = [];
+  let snapped = 0;
+  for (let j = 1; j <= n; j++) {
+    const ang = startAngle + dir * (j * 360 / k + (rand() - 0.5) * 10);
+    let pt = destination(center, ang, r * (0.9 + rand() * 0.2));
+    const tr = snapToPoi(pt, tracks, Math.max(2500, r * 0.35), used);
+    if (tr) { pt = tr.point; snapped++; }
+    waypoints.push(pt);
+  }
+  return { waypoints, snap: snapped > 0, key: 'OL' + i };
+}
+
+// Densifie un détour A→B avec des pistes (tout-terrain).
+export function densifyWithTracks(A, B, waypoints, tracks, share) {
+  const line = [A, ...waypoints, B];
+  const cum = [0];
+  for (let k = 1; k < line.length; k++) cum.push(cum[k - 1] + haversine(line[k - 1], line[k]));
+  const total = cum[cum.length - 1];
+  const count = Math.max(2, Math.min(7, Math.round(2 + 6 * share)));
+  const used = new Set();
+  const out = [];
+  for (let j = 1; j <= count; j++) {
+    const d = (j / (count + 1)) * total;
+    let k = 1; while (k < cum.length - 1 && cum[k] < d) k++;
+    const f = (d - cum[k - 1]) / Math.max(1, cum[k] - cum[k - 1]);
+    const p = [line[k - 1][0] + (line[k][0] - line[k - 1][0]) * f, line[k - 1][1] + (line[k][1] - line[k - 1][1]) * f];
+    const tr = snapToPoi(p, tracks, Math.max(3000, total * 0.06), used);
+    out.push(tr ? tr.point : p);
+  }
+  return out;
 }
 
 export function abCandidate(i, A, B, straightTarget, d, pois, rand) {
@@ -384,7 +432,19 @@ export class PlanSession {
     this.usedNames = new Set();
     this.pendingStops = [];
     this.stats = { computed: 0, rejectedRide: 0, rejectedDown: 0, rejectedSimilar: 0, rejectedQuality: 0, rejectedUturn: 0, failures: 0 };
-    this.profile = routingProfile(params.settings, this.d);
+    this.terrain = params.terrain || 'road';
+    this.off = this.terrain === 'offroad' ? { share: 0.4, level: 'intermediate', bikeType: 'heavy', maxSlowMin: 20, legality: 'standard', useTet: true, ...(params.offroad || {}) } : null;
+    this.profile = this.off ? offroadProfile(params.settings, this.off.share) : routingProfile(params.settings, this.d);
+    if (this.off) {
+      this.off.maxGrade = maxGradeFor(this.off.level, this.off.bikeType);
+      this.ctx.share = this.off.share;
+      this.ctx.maxSlowMin = this.off.maxSlowMin;
+      Object.assign(this.stats, { rejectedHard: 0, rejectedIllegal: 0, rejectedOverheat: 0, rejectedNoTrack: 0 });
+    }
+    this.traces = memory.traces || [];
+    this.tagCache = new Map();
+    this.trackPois = [];
+    this.tetSections = [];
     this.running = false;
     this.stopRequested = false;
     this.pois = [];
@@ -427,15 +487,71 @@ export class PlanSession {
     this.pois = await fetchInterest(this.area, this.signal);
     this.step(this.pois.length ? `${this.pois.length} cols, belvédères et lacs repérés` : 'Pas de points d\'intérêt trouvés, on se fie aux virages');
     this.hooks.onPois?.(this.pois.length);
+    if (this.off) await this.prepareOffroad();
 
     if (p.mode === 'ab' && (this.d === 0 || this.ctx.targetS <= this.ctx.fastS * 1.05)) {
       // Au plus direct : le trajet le plus rapide et ses variantes, même s'ils ont déjà été faits.
-      [this.reference, ...this.refAlternates].forEach((r, k) => this.consider({ route: r, waypoints: [], key: 'REF' + k, isReference: k === 0 }, { ignoreHistory: true }));
+      for (const [k, r] of [this.reference, ...this.refAlternates].entries()) {
+        await this.consider({ route: r, waypoints: [], key: 'REF' + k, isReference: k === 0 }, { ignoreHistory: true });
+      }
       await this.flushStops();
       this.finishRun(0);
       return;
     }
     await this.run(32, 8);
+  }
+
+  // Pistes de la zone (points d'accroche) et traces importées (TET) proches du départ.
+  async prepareOffroad() {
+    const p = this.params;
+    const bb = this.area.type === 'around' ? bbox([this.area.center], this.area.radius) : this.area.bbox;
+    this.step('Repérage des pistes autour de toi…');
+    try {
+      const tracks = await tracksInArea(bb, { signal: this.signal });
+      this.trackPois = tracks.map((t) => {
+        const g = gradeOf(t.tags);
+        const lg = legalityOf(t.tags, { offroad: true });
+        return { id: 'w' + t.id, kind: 'track', name: t.tags.name || '', point: t.point, grade: g.grade, weight: (lg === 'green' ? 3 : 2) - Math.max(0, g.grade - 2) * 0.3 };
+      }).filter((t) => t.grade <= this.off.maxGrade);
+    } catch (e) {
+      if (e instanceof AbortedError) throw e;
+      this.trackPois = [];
+    }
+    // Traces importées : on ne garde que les morceaux dans la zone.
+    const inZone = (pt) => pt[0] >= bb.s && pt[0] <= bb.n && pt[1] >= bb.w && pt[1] <= bb.e;
+    const near = this.traces.filter((t) => t.points.some(inZone));
+    this.tet = tetIndex(near.map((t) => ({ points: t.points.filter(inZone) })).filter((t) => t.points.length > 1));
+    if (this.off.useTet && near.length && p.mode === 'loop') {
+      const loopKm = this.loopKm();
+      this.tetSections = tetSectionsNear(near, p.start, loopKm * 1000 / 2.3);
+    }
+    this.step(`${this.trackPois.length} pistes repérées` + (this.tetSections.length ? ` · ${this.tetSections.length} tronçon${this.tetSections.length > 1 ? 's' : ''} de trace (TET) à portée` : ''));
+  }
+
+  // Boucle par un tronçon de trace : approche, tronçon suivi exactement (trace_route), retour.
+  async routeTet(cand) {
+    const p = this.params;
+    const pts = cand.tetPts;
+    const a = pts[0], b = pts[pts.length - 1];
+    const back = tetBackPoint(p.start, cand.backFirst ? a : b, cand.side || 1, cand.backFactor || 0.3);
+    cand.waypoints = cand.backFirst ? [back, a, b] : [a, b, back];
+    const opt = { signal: this.signal, profile: this.profile };
+    const S0 = { lat: p.start[0], lon: p.start[1] };
+    const B = { lat: back[0], lon: back[1], type: 'through' };
+    // Départ sur la trace (ou retour qui y finit) : pas d'approche à calculer.
+    const near = (x) => haversine(x, p.start) < 150;
+    const r1 = cand.backFirst || !near(a) ? await route(cand.backFirst ? [S0, B, { lat: a[0], lon: a[1] }] : [S0, { lat: a[0], lon: a[1] }], p.settings, opt) : null;
+    const r2 = await traceRoute(pts, p.settings, { signal: this.signal });
+    const r3 = !cand.backFirst || !near(b) ? await route(cand.backFirst ? [{ lat: b[0], lon: b[1] }, S0] : [{ lat: b[0], lon: b[1] }, B, S0], p.settings, opt) : null;
+    const r = joinTet(r1, r2, r3, cand.traceName);
+    cand.tetRange = [r1 ? r1.totalM : 0, (r1 ? r1.totalM : 0) + r2.totalM];
+    return r;
+  }
+
+  loopKm() {
+    const share = this.off ? this.off.share : 0;
+    const v = (1 - share) * 14 + share * 7; // m/s
+    return this.ctx.targetS * v / 1000 * (this.scaleTet || 1);
   }
 
   async more() {
@@ -451,6 +567,34 @@ export class PlanSession {
     const i = this.i++;
     const prefs = this.prefs || {};
     const snapBias = Math.max(0, Math.max(prefs.pano || 0, prefs.curv || 0, prefs.lake || 0)) * 0.3;
+    // Une fois sur trois, une boucle par un tronçon de trace (TET), chaque combinaison essayée une seule fois.
+    if (this.off && p.mode === 'loop' && this.tetSections.length && !this.tetDone && i % 3 === 0) {
+      for (let guard = 0; guard < 64; guard++) {
+        const c = tetLoopCandidate(this.tetI = (this.tetI ?? -1) + 1, p.start, this.loopKm(), this.off.share, this.tetSections, this.rand);
+        if (c === null) { this.tetDone = true; break; }
+        if (c) return c;
+      }
+    }
+    if (this.off) {
+      // Points de passage accrochés à des pistes (selon ton niveau), plus rarement à des belvédères.
+      const pois = this.trackPois.length ? this.trackPois.concat(this.pois.filter((x) => x.kind !== 'lake')) : this.pois;
+      const tracks = this.trackPois.length ? this.trackPois : pois;
+      if (p.mode === 'loop') {
+        const round = Math.floor(i / LOOP_BEARINGS.length);
+        const sc = this.scale * (1 + [0, 0.12, -0.1, 0.2, -0.15][round % 5]);
+        const c = offroadLoopCandidate(i, p.start, this.ctx.targetS, this.off.share, tracks, sc, this.rand);
+        c.label = 'boucle vers ' + dirName(bearing(p.start, c.waypoints[0]) + 30) + ' par les pistes';
+        return c;
+      }
+      const D = haversine(p.start, p.end);
+      const st = D + (this.straightTarget - D) * this.scale * (0.85 - 0.25 * this.off.share);
+      const c = abCandidate(i, p.start, p.end, Math.max(st, D * 1.1), 0.9, pois, this.rand);
+      if (c) {
+        c.waypoints = densifyWithTracks(p.start, p.end, c.waypoints, tracks, this.off.share);
+        c.label = 'détour par ' + dirName(bearing(p.start, c.waypoints[Math.floor(c.waypoints.length / 2)])) + ' par les pistes';
+      }
+      return c;
+    }
     if (p.mode === 'loop') {
       const round = Math.floor(i / LOOP_BEARINGS.length);
       const sc = this.scale * (1 + [0, 0.12, -0.1, 0.2, -0.15][round % 5]);
@@ -479,44 +623,66 @@ export class PlanSession {
         const poiName = cand.snap ? this.pois.find((x) => cand.waypoints.some((w) => haversine(w, x.point) < 50) && x.name)?.name : null;
         this.step(`Parcours ${num} : ${cand.label}${poiName ? ' par ' + poiName : ''}…`);
         const locs = [{ lat: p.start[0], lon: p.start[1] }];
-        for (const w of cand.waypoints) locs.push({ lat: w[0], lon: w[1], type: 'through', filter: WAYPOINT_FILTER });
+        const wf = this.off ? null : WAYPOINT_FILTER;
+        for (const w of cand.waypoints) locs.push({ lat: w[0], lon: w[1], type: 'through', filter: wf });
         const end = p.mode === 'loop' ? p.start : p.end;
         locs.push({ lat: end[0], lon: end[1] });
         try {
-          cand.route = await route(locs, p.settings, { signal: this.signal, profile: this.profile });
+          cand.route = cand.tet ? await this.routeTet(cand) : await route(locs, p.settings, { signal: this.signal, profile: this.profile });
           netFailures = 0;
-          // Calibrage progressif sur la durée visée.
+          this.lastReject = null;
+          let ok = await this.consider(cand);
+          // Calibrage progressif sur la durée visée (après l'éventuel ajustement tout-terrain de la durée).
+          // Les boucles par le TET ont leur propre échelle.
           const ratio = cand.route.timeS / this.ctx.targetS;
-          if (p.mode === 'loop') this.scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / ratio)), 0.6);
+          if (p.mode === 'loop' && cand.tet) this.scaleTet = Math.min(2.2, Math.max(0.5, (this.scaleTet || 1) * Math.pow(Math.min(1.8, Math.max(0.55, 1 / ratio)), 0.6)));
+          else if (p.mode === 'loop') this.scale *= Math.pow(Math.min(1.8, Math.max(0.5, 1 / ratio)), this.off ? 0.8 : 0.6);
           else {
             const extra = (cand.route.timeS - this.ctx.fastS) / Math.max(60, this.ctx.targetS - this.ctx.fastS);
             this.scale *= Math.pow(Math.min(1.8, Math.max(0.55, 1 / Math.max(0.2, extra))), 0.5);
           }
-          this.lastReject = null;
-          let ok = this.consider(cand);
           // Réparation : on retire le point de passage qui provoque le demi-tour et on recalcule une fois.
+          // Boucle par le TET : on parcourt le tronçon dans l'autre sens et on revient par l'autre côté.
           const minLeft = p.mode === 'loop' ? 2 : 1;
-          if (!ok && this.lastReject?.why === 'uturn' && this.lastReject.info.point && cand.waypoints.length > minLeft) {
+          if (!ok && cand.tet && this.lastReject?.why === 'uturn') {
+            // Retour (ou aller) par l'autre côté, puis plus loin de la trace.
+            for (const [flip, factor] of [[true, 0.3], [false, 0.55]]) {
+              if (ok || this.lastReject?.why !== 'uturn') break;
+              if (flip) cand.side = -cand.side;
+              cand.backFactor = factor;
+              this.step(`Parcours ${num} : correction d'un demi-tour…`);
+              try {
+                cand.route = await this.routeTet(cand);
+                this.stats.repairs = (this.stats.repairs || 0) + 1;
+                this.lastReject = null;
+                ok = await this.consider(cand);
+              } catch (e2) {
+                if (e2 instanceof AbortedError) throw e2;
+                break;
+              }
+            }
+          } else if (!ok && this.lastReject?.why === 'uturn' && this.lastReject.info.point && cand.waypoints.length > minLeft) {
             const at = this.lastReject.info.point;
             let k = 0;
             cand.waypoints.forEach((w, j) => { if (haversine(w, at) < haversine(cand.waypoints[k], at)) k = j; });
             if (haversine(cand.waypoints[k], at) < 8000) {
               cand.waypoints = cand.waypoints.filter((_, j) => j !== k);
               const locs2 = [{ lat: p.start[0], lon: p.start[1] }];
-              for (const w of cand.waypoints) locs2.push({ lat: w[0], lon: w[1], type: 'through', filter: WAYPOINT_FILTER });
+              for (const w of cand.waypoints) locs2.push({ lat: w[0], lon: w[1], type: 'through', filter: wf });
               locs2.push({ lat: end[0], lon: end[1] });
               this.step(`Parcours ${num} : correction d'un demi-tour…`);
               try {
                 cand.route = await route(locs2, p.settings, { signal: this.signal, profile: this.profile });
                 this.stats.repairs = (this.stats.repairs || 0) + 1;
                 this.lastReject = null;
-                ok = this.consider(cand);
+                ok = await this.consider(cand);
               } catch (e2) {
                 if (e2 instanceof AbortedError) throw e2;
               }
             }
           }
           if (!ok && this.lastReject?.why === 'uturn') this.stats.rejectedUturn++;
+          if (!ok && this.lastReject?.why && this.lastReject.why !== 'uturn') this.stats[this.lastReject.why] = (this.stats[this.lastReject.why] || 0) + 1;
           if (ok) added++;
         } catch (e) {
           if (e instanceof AbortedError) throw e;
@@ -542,13 +708,42 @@ export class PlanSession {
   }
 
   // Évalue un candidat et le publie s'il est bon, nouveau et différent des autres.
-  consider(cand, { ignoreHistory = false } = {}) {
+  async consider(cand, { ignoreHistory = false } = {}) {
     const r = cand.route;
+    // Tout-terrain : voies empruntées, difficulté, légalité, alternance piste / route.
+    let oa = null;
+    if (this.off) {
+      try {
+        const edges = await traceEdges(r.shape, { signal: this.signal });
+        const missing = [...new Set(edges.filter(isOffroadEdge).map((e) => e.way_id))].filter((id) => id != null && !this.tagCache.has(id));
+        if (missing.length) {
+          const tags = await wayTags(missing, { signal: this.signal });
+          for (const id of missing) this.tagCache.set(id, tags.get(id) || {});
+        }
+        oa = analyzeOffroad(edges, this.tagCache, this.tet, { maxGrade: this.off.maxGrade, maxSlowMin: this.off.maxSlowMin });
+      } catch (e) {
+        if (e instanceof AbortedError) throw e;
+        oa = null; // analyse impossible : parcours gardé mais signalé « non vérifié »
+      }
+      if (oa) {
+        // Durée réaliste : on roule moins vite sur piste que ne l'estime le moteur d'itinéraires.
+        if (oa.extraMin > 0 && !r.offroadAdjusted) {
+          r.timeS += oa.extraMin * 60;
+          r.offroadAdjusted = true;
+          finalizeRoute(r);
+        }
+        if (oa.legal.red > 0.1) { this.lastReject = { why: 'rejectedIllegal' }; return false; }
+        if (this.off.legality === 'strict' && oa.legal.orange > 0.5) { this.lastReject = { why: 'rejectedIllegal' }; return false; }
+        if (oa.tooHard) { this.lastReject = { why: 'rejectedHard' }; return false; }
+        if (oa.longestSlowMin > this.off.maxSlowMin * (2 + 2 * this.off.share)) { this.lastReject = { why: 'rejectedOverheat' }; return false; }
+        if (this.off.share >= 0.15 && oa.offKm < 2 && !(cand.tet && oa.tetKm >= 5)) { this.lastReject = { why: 'rejectedNoTrack' }; return false; }
+      }
+    }
     const m = analyzeRoute(r, this.pois, this.params.mode);
     const ratio = r.timeS / this.ctx.targetS;
     if (!cand.isReference) {
       const badDuration = this.params.mode === 'loop' ? (ratio < 0.75 || ratio > 1.2) : (r.timeS > this.ctx.maxS * 1.05);
-      if (badDuration) { this.stats.rejectedQuality++; return false; }
+      if (badDuration) { this.lastReject = { why: 'rejectedQuality' }; return false; }
       // Zéro demi-tour : on écarte tout parcours qui revient sur ses pas.
       const rt = retraceInfo(r, this.params.mode);
       if (hasUTurn(rt)) { this.lastReject = { why: 'uturn', info: rt }; return false; }
@@ -557,7 +752,7 @@ export class PlanSession {
     if (!ignoreHistory) {
       for (const ex of this.exclusions) {
         if (coverage(cells, ex.cells) >= 0.6) {
-          if (ex.why === 'ride') this.stats.rejectedRide++; else this.stats.rejectedDown++;
+          this.lastReject = { why: ex.why === 'ride' ? 'rejectedRide' : 'rejectedDown' };
           return false;
         }
       }
@@ -565,10 +760,11 @@ export class PlanSession {
     for (const o of this.shown) {
       const sim = coverage(cells, o.cells) ;
       const sim2 = coverage(o.cells, cells);
-      if (Math.max(sim, sim2) >= 0.6) { this.stats.rejectedSimilar++; return false; }
+      if (Math.max(sim, sim2) >= 0.6) { this.lastReject = { why: 'rejectedSimilar' }; return false; }
     }
     const f = featureVector(m);
-    const score = scoreRoute(m, r, this.ctx) + personalBonus(f, this.prefs);
+    let score = scoreRoute(m, r, this.ctx) + personalBonus(f, this.prefs);
+    if (this.off) score += oa ? offroadScore(oa, this.ctx) : -1;
     const option = {
       id: 'o' + Date.now().toString(36) + '-' + this.shown.length,
       key: cand.key,
@@ -584,7 +780,12 @@ export class PlanSession {
       stops: [],
       stopsReady: false,
       isReference: !!cand.isReference,
-      profile: r.profile === 'motor_scooter' ? this.profile : null,
+      profile: this.off ? this.profile : (r.profile === 'motor_scooter' ? this.profile : null),
+      terrain: this.terrain,
+      tetRange: cand.tetRange || null,
+      backFirst: !!cand.backFirst,
+      traceName: cand.traceName || null,
+      offroad: this.off ? (oa ? { ...oa, checked: true, level: this.off.level, maxGradeAllowed: this.off.maxGrade, tet: !!cand.tet } : { checked: false }) : null,
     };
     option.name = nameFor(option, this.params.mode, this.rand, this.usedNames);
     this.usedNames.add(option.name);
@@ -641,6 +842,7 @@ export class PlanSession {
 
 // Recalcule le parcours choisi en passant par les pauses (pour que le guidage y mène).
 export async function routeWithStops(option, settings, { signal } = {}) {
+  if (option.tetRange) return routeTetWithStops(option, settings, { signal });
   const r0 = option.route;
   const items = [];
   for (const w of option.waypoints) {
@@ -665,4 +867,50 @@ export async function routeWithStops(option, settings, { signal } = {}) {
     s.legIndex = k;
   });
   return r;
+}
+
+// Boucle par le TET : on garde le tronçon de trace tel quel, on recalcule l'approche et le retour
+// en passant par les pauses. Les pauses situées sur le tronçon restent signalées en chemin.
+async function routeTetWithStops(option, settings, { signal } = {}) {
+  const r0 = option.route;
+  const [m0, m1] = option.tetRange;
+  const mid = sliceRoute(r0, m0, m1);
+  const a = mid.shape[0], b = mid.shape[mid.shape.length - 1];
+  const stopItem = (s) => { const t = s.distFromRoute <= 250 ? s.point : s.routePoint; return { along: s.along, lat: t[0], lon: t[1], type: 'break', stop: s }; };
+  const before = option.stops.filter((s) => s.along < m0 - 200).sort((x, y) => x.along - y.along);
+  const after = option.stops.filter((s) => s.along > m1 + 200).sort((x, y) => x.along - y.along);
+  const back = option.backFirst ? option.waypoints[0] : option.waypoints[2];
+  const beforeItems = before.map(stopItem);
+  const afterItems = after.map(stopItem);
+  if (back) {
+    const nb = nearestOnLine(r0.shape, r0.cum, back);
+    const list = option.backFirst ? beforeItems : afterItems;
+    list.push({ along: nb.along, lat: back[0], lon: back[1], type: 'through' });
+    list.sort((x, y) => x.along - y.along);
+  }
+  const close = (x, y) => haversine(x, y) < 150;
+  const ra = beforeItems.length || !close(a, option.start) ? await route([{ lat: option.start[0], lon: option.start[1] }, ...beforeItems, { lat: a[0], lon: a[1] }], settings, { signal, profile: option.profile || null }) : null;
+  const rb = afterItems.length || !close(b, option.end) ? await route([{ lat: b[0], lon: b[1] }, ...afterItems, { lat: option.end[0], lon: option.end[1] }], settings, { signal, profile: option.profile || null }) : null;
+  const r = joinTet(ra, mid, rb, option.traceName);
+  const legTime = (k) => r.legs.slice(0, k + 1).reduce((acc, l) => acc + l.timeS, 0);
+  before.forEach((s, k) => { const leg = r.legs[k]; if (leg) { s.along = r.cum[leg.end]; s.timeS = legTime(k); s.legIndex = k; } });
+  const base = (ra ? ra.legs.length : 0) + mid.legs.length;
+  after.forEach((s, k) => { const k2 = base + k; const leg = r.legs[k2]; if (leg) { s.along = r.cum[leg.end]; s.timeS = legTime(k2); s.legIndex = k2; } });
+  for (const s of option.stops) {
+    if (before.includes(s) || after.includes(s)) continue;
+    const near = nearestOnLine(r.shape, r.cum, s.routePoint || s.point);
+    s.along = near.along; s.timeS = timeAt(r, near.along);
+  }
+  option.tetRange = [ra ? ra.totalM : 0, (ra ? ra.totalM : 0) + mid.totalM];
+  return r;
+}
+
+// Approche (facultative) + tronçon de trace + retour (facultatif), avec les annonces aux jonctions.
+function joinTet(r1, r2, r3, traceName) {
+  const name = traceName || 'TET';
+  const parts = [], labels = [];
+  if (r1) { parts.push(r1); labels.push(null); }
+  parts.push(r2); labels.push(r1 ? `Prenez la trace « ${name} ».` : null);
+  if (r3) { parts.push(r3); labels.push(`Fin du tronçon « ${name} », retour par la route.`); }
+  return joinRoutes(parts, labels);
 }

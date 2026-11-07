@@ -5,10 +5,12 @@ import { PlanSession, routeWithStops, analyzeRoute, abTargetMinutes, featureVect
 import {
   saveRide, listRides, deleteRide, rateRide, rideRecord, rideTrack, unpackOption,
   saveLiked, deleteLiked, listLiked, loadPrefs, resetPrefs, loadVotes, clearVotes, learn, recordVote,
-  exclusionSets, TASTES,
+  exclusionSets, TASTES, saveTrace, deleteTrace, listTraces,
 } from './store.js';
-import { route as fetchRoute, searchPlaces, AbortedError, setRateGap, timeAt, roadClassShare } from './services.js';
-import { createMap, setTheme, routeLayer, markerIcon, stopMarker, meIcon, aheadCenter, thumbSvg } from './map.js';
+import { route as fetchRoute, searchPlaces, AbortedError, setRateGap, timeAt, roadClassShare, traceRoute, geometricRoute, traceEdges, wayTags } from './services.js';
+import { LEVELS, maxGradeFor, gradeLabel, offroadProfile, isOffroadEdge, analyzeOffroad, tetIndex } from './offroad.js';
+import { parseGpx, packTrace, unpackTrace, tracePortion } from './traces.js';
+import { createMap, setTheme, setTiles, routeLayer, markerIcon, stopMarker, meIcon, aheadCenter, thumbSvg } from './map.js';
 import { NavEngine } from './navigator.js';
 import { Simulator } from './sim.js';
 import { initVoice, speak, setVoiceEnabled, unlockVoice } from './voice.js';
@@ -161,7 +163,36 @@ function setMode(mode) {
   if (mode === 'ab') refreshFast();
 }
 
+function setTerrain(t) {
+  S.settings.terrain = t;
+  saveSettings(S.settings);
+  $('#terrain-road').setAttribute('aria-pressed', String(t === 'road'));
+  $('#terrain-off').setAttribute('aria-pressed', String(t === 'offroad'));
+  $$('.off-only').forEach((el) => { el.hidden = t !== 'offroad'; });
+  $$('.road-only').forEach((el) => { el.hidden = t === 'offroad'; });
+  renderHome();
+}
+
+function renderOffroadControls() {
+  const s = S.settings;
+  $$('[data-level]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.level === s.offLevel)));
+  const g = maxGradeFor(s.offLevel, s.bikeType);
+  const desc = { 1: 'pistes roulantes uniquement', 2: 'pistes faciles (compactes)', 3: 'jusqu\'aux pistes moyennes (graviers, ornières légères)', 4: 'jusqu\'aux pistes difficiles (terrain dégradé)', 5: 'tout, y compris très technique' }[g];
+  $('#level-hint').textContent = `Difficulté max : ${desc}.`;
+  $('#bike-type-link').textContent = s.bikeType === 'heavy' ? 'Trail lourd' : 'Moto légère';
+  $('#off-share').value = s.offShare;
+  $('#off-share-out').textContent = s.offShare + ' %';
+  $('#alternate-hint').textContent = s.alternate
+    ? `Alternance piste et route : pas plus de ${s.maxSlowMin} min de piste d'affilée si possible.`
+    : 'Alternance piste et route désactivée (Réglages).';
+  const n = (S.traces || []).length;
+  $('#tet-row').hidden = n === 0;
+  $('#use-tet').checked = !!s.useTet;
+  $('#tet-label').textContent = `Passer par mes traces GPX (TET) · ${n} importée${n > 1 ? 's' : ''}`;
+}
+
 function renderHome() {
+  renderOffroadControls();
   const s = S.settings;
   $('#duration-out').textContent = fmtDuration(s.durationMin);
   $('#wish-out').textContent = fmtDuration(s.wishMin);
@@ -309,6 +340,8 @@ function renderSettings() {
   $$('[data-pause-type]').forEach((b) => b.setAttribute('aria-pressed', String(!!s.pauseTypes[b.dataset.pauseType])));
   $$('[data-avoid]').forEach((el) => { el.checked = !!s.avoid[el.dataset.avoid]; });
   $$('[data-theme]').forEach((b) => b.setAttribute('aria-pressed', String(s.theme === b.dataset.theme)));
+  $$('[data-bike]').forEach((b) => b.setAttribute('aria-pressed', String(s.bikeType === b.dataset.bike)));
+  $$('[data-legality]').forEach((b) => b.setAttribute('aria-pressed', String(s.offLegality === b.dataset.legality)));
 }
 
 function bindSettings() {
@@ -335,6 +368,16 @@ function bindSettings() {
   }));
   $$('[data-theme]').forEach((b) => b.addEventListener('click', () => {
     S.settings.theme = b.dataset.theme;
+    saveSettings(S.settings);
+    renderSettings();
+  }));
+  $$('[data-bike]').forEach((b) => b.addEventListener('click', () => {
+    S.settings.bikeType = b.dataset.bike;
+    saveSettings(S.settings);
+    renderSettings();
+  }));
+  $$('[data-legality]').forEach((b) => b.addEventListener('click', () => {
+    S.settings.offLegality = b.dataset.legality;
     saveSettings(S.settings);
     renderSettings();
   }));
@@ -373,12 +416,17 @@ async function startSearch() {
     fuelKm: s.fuelKm,
     settings: JSON.parse(JSON.stringify(s)),
     departure: new Date(),
+    terrain: s.terrain,
+    offroad: s.terrain === 'offroad' ? {
+      level: s.offLevel, share: s.offShare / 100, bikeType: s.bikeType,
+      maxSlowMin: s.alternate ? s.maxSlowMin : 999, legality: s.offLegality, useTet: !!s.useTet,
+    } : null,
   };
   CURRENT.session?.cancel();
   S.plan = { params: p };
-  $('#list-sub').textContent = (p.mode === 'loop'
-    ? `Boucle · ${fmtDuration(p.durationMin)} de roulage`
-    : `Vers ${S.end.label}`) + ` · découverte ${s.discovery} % · ${p.fuelKm} km d'autonomie`;
+  $('#list-sub').textContent = p.terrain === 'offroad'
+    ? `Tout-terrain · ${p.mode === 'loop' ? 'boucle de ' + fmtDuration(p.durationMin) : 'vers ' + S.end.label} · pistes ${s.offShare} % · ${LEVELS[s.offLevel].label.toLowerCase()} (${s.bikeType === 'heavy' ? 'trail lourd' : 'moto légère'})`
+    : (p.mode === 'loop' ? `Boucle · ${fmtDuration(p.durationMin)} de roulage` : `Vers ${S.end.label}`) + ` · découverte ${s.discovery} % · ${p.fuelKm} km d'autonomie`;
   $('#route-list').innerHTML = '<div class="empty-card" id="list-placeholder">Les premiers parcours arrivent…</div>';
   $('#list-msg').hidden = true;
   $('#list-error-actions').hidden = true;
@@ -390,7 +438,7 @@ async function startSearch() {
 
   let exclusions = [];
   try { exclusions = await exclusionSets(); } catch { /* mémoire indisponible */ }
-  const session = new PlanSession(p, searchHooks(), { exclusions, prefs: loadPrefs() });
+  const session = new PlanSession(p, searchHooks(), { exclusions, prefs: loadPrefs(), traces: p.terrain === 'offroad' ? (S.traces || []) : [] });
   CURRENT.session = session;
   S.plan.session = session;
   session.budget = 24;
@@ -459,7 +507,11 @@ function searchDone(info) {
   if (info.added === 0) {
     const alreadyDone = st.rejectedRide + st.rejectedDown;
     msg.hidden = false;
-    if (session.options.length === 0 && alreadyDone > 0) {
+    if (session.options.length === 0 && session.off && (st.rejectedHard || 0) > (st.computed || 1) / 3) {
+      msg.textContent = 'Aucun parcours à ton niveau ici : beaucoup de pistes sont trop difficiles ou sans information de difficulté (comptées comme moyennes). Essaie le niveau au-dessus, ou une part de pistes plus faible.';
+    } else if (session.options.length === 0 && session.off) {
+      msg.textContent = 'Aucun parcours tout-terrain trouvé avec ces réglages. Essaie une autre durée, une autre part de pistes ou un autre point de départ.';
+    } else if (session.options.length === 0 && alreadyDone > 0) {
       msg.textContent = `Tu as déjà roulé (ou écarté) tous les parcours trouvés avec ces réglages : ${alreadyDone} écarté${alreadyDone > 1 ? 's' : ''}. Augmente un peu la durée ou le degré de découverte pour en découvrir de nouveaux. Tes trajets déjà faits sont dans « Mes sorties ».`;
     } else if (session.options.length === 0) {
       msg.textContent = 'Aucun parcours trouvé avec ces réglages. Essaie une autre durée ou un autre point de départ.';
@@ -476,6 +528,10 @@ function searchDone(info) {
   if (st.rejectedRide) parts.push(`${st.rejectedRide} déjà fait${st.rejectedRide > 1 ? 's' : ''}`);
   if (st.rejectedDown) parts.push(`${st.rejectedDown} refusé${st.rejectedDown > 1 ? 's' : ''}`);
   if (st.failures) parts.push(`${st.failures} sans itinéraire`);
+  if (st.rejectedHard) parts.push(`${st.rejectedHard} trop difficile${st.rejectedHard > 1 ? 's' : ''} pour ton niveau`);
+  if (st.rejectedIllegal) parts.push(`${st.rejectedIllegal} avec piste interdite`);
+  if (st.rejectedOverheat) parts.push(`${st.rejectedOverheat} avec trop de piste d'affilée`);
+  if (st.rejectedNoTrack) parts.push(`${st.rejectedNoTrack} presque sans piste`);
   const ls = $('#list-stats');
   ls.hidden = false;
   ls.textContent = `${st.computed} parcours calculés, ${session.options.length} retenus` + (parts.length ? ` · écartés : ${parts.join(', ')}.` : '.');
@@ -515,8 +571,23 @@ function cardBody(o) {
           <span class="indic" role="img" aria-label="${m.panoramaCount} panoramas"><svg aria-hidden="true" style="color:var(--teal)"><use href="#i-mountain"/></svg>${m.panoramaCount}</span>
           ${pauseInfo}
         </span>
+        ${offroadLine(o)}
         ${o.fuelWarning ? `<span class="warn-line">${escapeHtml(o.fuelWarning.message)}</span>` : ''}
       </span>`;
+}
+
+function legalBar(x) {
+  const tot = (x.legal.green + x.legal.orange + x.legal.red) || 1;
+  const pc = (v) => (v / tot * 100).toFixed(1) + '%';
+  return `<span class="legal-bar" role="img" aria-label="Légalité : ${Math.round(x.legal.green)} km vert, ${Math.round(x.legal.orange)} km à vérifier"><i class="g" style="width:${pc(x.legal.green)}"></i><i class="o" style="width:${pc(x.legal.orange)}"></i><i class="r" style="width:${pc(x.legal.red)}"></i></span>`;
+}
+
+function offroadLine(o) {
+  const x = o.offroad;
+  if (!x) return '';
+  if (!x.checked) return '<span class="warn-line">Pistes non vérifiées (service indisponible)</span>';
+  if (x.offKm < 0.5) return `<span class="off-line"><span>Pas de piste repérée</span>${x.tetKm > 3 ? `<span>TET ${x.tetKm.toFixed(0)} km</span>` : ''}</span>`;
+  return `<span class="off-line"><span><svg aria-hidden="true" style="width:14px;height:14px;vertical-align:-2px;color:#7A5A2E"><use href="#i-track"/></svg> <b>${x.offKm.toFixed(0)} km</b> de pistes (${Math.round(x.share * 100)} %)</span><span>difficulté ${gradeLabel(x.maxGrade)}</span>${x.tetKm > 3 ? `<span>TET ${x.tetKm.toFixed(0)} km</span>` : ''}</span>${legalBar(x)}`;
 }
 
 function cardHtml(o) {
@@ -616,13 +687,26 @@ function renderDetail() {
   $('#detail-stats').innerHTML = `<b>${fmtDuration(r.timeS / 60)}</b> de roulage${pauseS ? ` + ${fmtDuration(pauseS / 60)} de pauses` : ''} · <b>${Math.round(r.totalM / 1000)} km</b>`;
   const ret = new Date(Date.now() + (r.timeS + pauseS) * 1000);
   const bits = [`Virages ${m.curvRating}/5`, `${m.panoramaCount} panorama${m.panoramaCount > 1 ? 's' : ''}`];
-  if (o.smallShare != null) bits.push(`petites routes ${Math.round(o.smallShare * 100)} %`);
+  if (o.smallShare != null && !o.offroad) bits.push(`petites routes ${Math.round(o.smallShare * 100)} %`);
+  const x = o.offroad;
+  if (x && x.checked) {
+    if (x.offKm >= 0.5) bits.unshift(`pistes ${x.offKm.toFixed(0)} km (${Math.round(x.share * 100)} %), difficulté max ${gradeLabel(x.maxGrade)}`, `piste d'affilée max ${Math.round(x.longestSlowMin)} min`);
+    else bits.unshift('pas de piste repérée');
+    if (x.tetKm > 3) bits.splice(1, 0, `${x.tetKm.toFixed(0)} km sur le TET`);
+  }
   if (m.highest) bits.push(`point culminant ${m.highest.name} ${m.highest.ele.toLocaleString('fr-FR')} m`);
   bits.push((o.mode === 'loop' ? 'retour' : 'arrivée') + ' vers ' + fmtClock(ret));
   $('#detail-sub').textContent = bits.join(' · ');
-  $('#detail-warn').hidden = !o.fuelWarning;
-  if (o.fuelWarning) $('#detail-warn').textContent = o.fuelWarning.message;
+  const warn = [o.fuelWarning?.message, o.note].filter(Boolean).join(' ');
+  $('#detail-warn').hidden = !warn;
+  $('#detail-warn').textContent = warn;
+  $('#detail-votes').hidden = !!o.trace;
   $('#detail-like').setAttribute('aria-pressed', String(!!o.liked));
+  const offBox = $('#detail-off');
+  if (x && x.checked && x.offKm >= 0.5) {
+    offBox.hidden = false;
+    offBox.innerHTML = `${legalBar(x)}<div class="legal-legend"><span><i style="background:#2F8F4E"></i>${x.legal.green.toFixed(0)} km de pistes ouvertes${x.tetKm > 3 ? ' ou TET' : ''}</span><span><i style="background:#E8900C"></i>${x.legal.orange.toFixed(0)} km à vérifier</span></div><p class="notice">Légalité indicative, d'après OpenStreetMap. La signalisation sur place et les règles régionales ou communales priment.</p>`;
+  } else offBox.hidden = true;
   $('#detail-votes').hidden = !!o.fromHistory;
 
   // Programme : départ, pauses, points de vue en passant, arrivée.
@@ -641,6 +725,14 @@ function renderDetail() {
     const nm = x.name || SIGHT_LABEL[x.kind];
     items.push({ t, along: x.along, muted: true, html: `<span class="tl-ico ring"><svg aria-hidden="true" style="color:var(--teal)"><use href="#${SIGHT_ICON[x.kind]}"/></svg></span><span class="tl-txt"><b style="font-weight:600">${escapeHtml(SIGHT_LABEL[x.kind])}, en passant</b><span>${escapeHtml(x.name && x.name !== nm ? x.name : (x.name || ''))}${x.ele ? ' · ' + x.ele + ' m' : ''}${x.name ? ' · ' : ''}km ${Math.round(x.along / 1000)}</span></span>` });
   }
+  // Sections de piste (les plus longues).
+  if (x && x.checked) {
+    const segs = x.segments.filter((g) => g.off && g.km >= 2).sort((a, b) => b.km - a.km).slice(0, 4);
+    for (const g of segs) {
+      const along = g.startKm * 1000 * (r.totalM / 1000 / Math.max(0.1, x.totalKm));
+      items.push({ t: timeAt(r, along), along, html: `<span class="tl-ico track"><svg aria-hidden="true" style="color:#fff"><use href="#i-track"/></svg></span><span class="tl-txt"><b>Piste · ${g.km.toFixed(1).replace('.', ',')} km</b><span>${gradeLabel(g.grade)} (grade ${g.grade}) · ${Math.round(g.min)} min${g.tet ? ' · TET' : ''}${g.legal === 'orange' ? ' · à vérifier' : ''}</span></span>` });
+    }
+  }
   items.sort((a, b) => a.along - b.along);
   items.push({ t: r.timeS, html: `<span class="tl-ico"><svg aria-hidden="true" style="color:#fff"><use href="#i-check"/></svg></span><span class="tl-txt"><b>${o.mode === 'loop' ? 'Retour au départ' : 'Arrivée'}</b><span>km ${Math.round(r.totalM / 1000)}</span></span>` });
   $('#detail-timeline').innerHTML = items.map((it) => `<li><span class="t ${it.muted ? 'muted' : ''}">${fmtClockDelta(it.t)}</span>${it.html}</li>`).join('');
@@ -648,6 +740,7 @@ function renderDetail() {
   // Carte.
   if (!S.maps.detail) S.maps.detail = createMap('detail-map');
   const map = S.maps.detail;
+  setTiles(map, o.terrain === 'offroad' ? 'topo' : 'osm');
   if (S.detailLayer) S.detailLayer.remove();
   const g = L.layerGroup().addTo(map);
   routeLayer(r).addTo(g);
@@ -695,7 +788,7 @@ async function openDetail(option, { fromHistory = false } = {}) {
   }
   busy(false);
   // Part réelle de petites routes (une requête, en arrière-plan).
-  if (option.smallShare == null && !option.smallShareTried) {
+  if (option.smallShare == null && !option.smallShareTried && !option.offroad) {
     option.smallShareTried = true;
     roadClassShare(option.route.shape).then((res) => {
       option.smallShare = res.small;
@@ -799,6 +892,8 @@ function startNav({ simulate = false } = {}) {
     S.maps.nav.on('dragstart', () => { if (S.nav) S.nav.follow = false; });
   } else setTheme(S.maps.nav, theme);
   const map = S.maps.nav;
+  setTiles(map, o.terrain === 'offroad' ? 'topo' : 'osm');
+  $('#off-chip').hidden = !(o.offroad && o.offroad.checked);
   map.setBearing(0);
   drawNavRoute(o.route);
   map.setView(o.start, 15);
@@ -847,6 +942,20 @@ function updateNav(st) {
       $('#man-next').hidden = false;
       $('#man-next').innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${maneuverIcon(f.m.type)}</g></svg>Puis ${escapeHtml(shortText(f.m).toLowerCase())} ${f.gap < 120 ? 'juste après' : 'dans ' + fmtDist(f.gap)}`;
     } else $('#man-next').hidden = true;
+  }
+  // Tout-terrain : section en cours (piste ou route).
+  const x = S.option?.offroad;
+  if (x && x.checked && x.segments?.length) {
+    const k = (x.totalKm * 1000) / Math.max(1, S.option.route.totalM);
+    const doneKm = (st.along * k) / 1000;
+    const cur = x.segments.find((g) => doneKm >= g.startKm && doneKm < g.startKm + g.km);
+    const next = x.segments.find((g) => g.off && g.startKm > doneKm);
+    const chip = $('#off-chip');
+    if (cur && cur.off) {
+      chip.innerHTML = `<i style="background:${cur.legal === 'orange' ? '#E8900C' : '#2F8F4E'}"></i>Piste ${gradeLabel(cur.grade)} · encore ${fmtDist((cur.startKm + cur.km - doneKm) * 1000)}`;
+    } else if (next) {
+      chip.innerHTML = `<i style="background:#7A8087"></i>Route · piste ${gradeLabel(next.grade)} dans ${fmtDist((next.startKm - doneKm) * 1000)}`;
+    } else chip.innerHTML = '<i style="background:#7A8087"></i>Route jusqu\'à l\'arrivée';
   }
   // Vitesse et résumé.
   $('#nav-speed').textContent = Math.round((st.speed || 0) * 3.6);
@@ -1164,6 +1273,15 @@ async function renderRides(focusId = null) {
     else map.setView(startPoint() || S.gps?.pos || [45.07, 7.4], 9);
   }, 60);
 
+  // Traces importées (TET…), en pointillés marron.
+  for (const t of S.traces || []) {
+    const focus = focusId === t.id;
+    const line = L.polyline(t.points, { color: '#7A5A2E', weight: focus ? 5 : 3, opacity: focus ? 1 : 0.7, dashArray: '2 7', lineCap: 'round' }).addTo(g);
+    if (focus) all.length = 0, all.push(...t.points), lines[t.id] = line;
+    else if (!rides.length) all.push(...t.points);
+  }
+  renderTraces(focusId);
+
   // Liste des sorties.
   $('#rides-section').hidden = rides.length === 0;
   $('#rides-list').innerHTML = rides.map((r) => {
@@ -1229,6 +1347,99 @@ async function renderRides(focusId = null) {
   $('#votes-list').innerHTML = votes.slice(0, 40).map((v) => `<li class="item"><svg aria-hidden="true" style="color:${v.vote === 'up' ? 'var(--teal)' : 'var(--accent)'}"><use href="#i-${v.vote === 'up' ? 'up' : 'down'}"/></svg><span style="flex:1;min-width:0">${escapeHtml(v.name)}</span><span class="item-sub">${v.km} km · ${new Date(v.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</span></li>`).join('');
 }
 
+// --- Traces GPX importées (TET…) -----------------------------------------------------
+
+async function loadTraces() {
+  try { S.traces = (await listTraces()).map(unpackTrace); } catch { S.traces = []; }
+}
+
+async function importGpx(e) {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  let n = 0, km = 0;
+  for (const f of files) {
+    try {
+      const list = parseGpx(await f.text(), f.name.replace(/\.gpx$/i, ''));
+      for (const t of list) { const rec = packTrace(t); await saveTrace(rec); n++; km += rec.km; }
+    } catch (err) {
+      toast(`${f.name} : ${err.message || 'fichier illisible'}`, 4000);
+    }
+  }
+  await loadTraces();
+  if (n) toast(`${n} trace${n > 1 ? 's' : ''} importée${n > 1 ? 's' : ''} · ${Math.round(km)} km`, 3000);
+  renderOffroadControls();
+  if (S.history[S.history.length - 1] === 'screen-rides') renderRides();
+}
+
+function renderTraces(focusId) {
+  const list = S.traces || [];
+  $('#traces-list').innerHTML = list.map((t) => `<li class="item ${t.id === focusId ? 'focus' : ''}" data-id="${t.id}">
+      <div class="item-head"><span class="item-swatch" style="background:#7A5A2E"></span>
+        <div style="flex:1;min-width:0"><div class="item-name">${escapeHtml(t.name)}</div>
+        <div class="item-sub">${String(t.km).replace('.', ',')} km · importée le ${new Date(t.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</div></div></div>
+      <div class="item-actions">
+        <button type="button" data-act="show">Voir sur la carte</button>
+        <button type="button" data-act="follow"><svg aria-hidden="true"><use href="#i-play"/></svg>Suivre</button>
+        <button type="button" data-act="reverse">Sens inverse</button>
+        <button type="button" data-act="del" class="danger" aria-label="Supprimer cette trace"><svg aria-hidden="true"><use href="#i-trash"/></svg></button>
+      </div></li>`).join('');
+  $$('#traces-list .item').forEach((li) => {
+    const t = list.find((x) => x.id === li.dataset.id);
+    li.querySelector('[data-act="show"]').addEventListener('click', () => { renderRides(t.id); $('#screen-rides .scroll').scrollTo({ top: 0, behavior: 'smooth' }); });
+    li.querySelector('[data-act="follow"]').addEventListener('click', () => followTrace(t, false));
+    li.querySelector('[data-act="reverse"]').addEventListener('click', () => followTrace(t, true));
+    const del = li.querySelector('[data-act="del"]');
+    del.addEventListener('click', async () => {
+      if (del.dataset.confirm !== '1') { del.dataset.confirm = '1'; del.innerHTML = 'Confirmer la suppression'; return; }
+      await deleteTrace(t.id);
+      await loadTraces();
+      renderRides();
+      renderOffroadControls();
+    });
+  });
+}
+
+// Suivi de trace : portion de 150 km max depuis le point de la trace le plus proche.
+async function followTrace(t, reverse) {
+  const near = (S.gps && S.gps.pos) || startPoint() || t.points[0];
+  const part = tracePortion(t, near, 150, reverse);
+  if (part.points.length < 2) { toast('Rien à suivre dans ce sens depuis ta position'); return; }
+  toast('Calage de la trace sur la carte…', 8000);
+  let r;
+  try { r = await traceRoute(part.points, S.settings); }
+  catch (e) { r = geometricRoute(part.points); r.geometric = true; }
+  const s = S.settings;
+  const option = {
+    id: 'trace-' + t.id + (reverse ? '-r' : ''),
+    name: t.name + (reverse ? ' (sens inverse)' : ''),
+    mode: 'ab',
+    start: part.points[0],
+    end: part.points[part.points.length - 1],
+    waypoints: [],
+    route: r,
+    stops: [],
+    stopsReady: true,
+    metrics: analyzeRoute(r, [], 'ab'),
+    terrain: 'offroad',
+    profile: offroadProfile(s, 0.9),
+    trace: true,
+    offroad: null,
+    startLabel: part.startDist > 300 ? 'Point de la trace le plus proche' : 'Sur la trace',
+  };
+  // Analyse des pistes (difficulté, légalité) si le service répond.
+  try {
+    const edges = await traceEdges(r.shape);
+    const ids = [...new Set(edges.filter(isOffroadEdge).map((e) => e.way_id))].filter((id) => id != null);
+    const tags = await wayTags(ids);
+    const oa = analyzeOffroad(edges, tags, tetIndex([{ points: part.points }]), { maxGrade: 6, maxSlowMin: 999 });
+    option.offroad = { ...oa, checked: true, level: s.offLevel, maxGradeAllowed: maxGradeFor(s.offLevel, s.bikeType), tet: true };
+  } catch { option.offroad = { checked: false }; }
+  $('#toast').hidden = true;
+  option.note = part.startDist > 300 ? `Début de la trace à ${fmtDist(part.startDist)} : le guidage t'y emmène.` : null;
+  if (r.geometric) option.note = (option.note ? option.note + ' ' : '') + 'Trace non calée sur les routes (service indisponible) : guidage simplifié, sans instructions.';
+  openDetail(option, { fromHistory: true });
+}
+
 // --- Goûts appris (réglages) ---------------------------------------------------------
 
 function renderTastes() {
@@ -1270,10 +1481,20 @@ async function init() {
   bindPlace($('[data-place="start"]'), 'start');
   bindPlace($('[data-place="end"]'), 'end');
   $('#start-input').value = S.start.label;
+  await loadTraces();
   setMode(S.settings.mode);
+  setTerrain(S.settings.terrain || 'road');
 
   $('#mode-loop').addEventListener('click', () => setMode('loop'));
   $('#mode-ab').addEventListener('click', () => setMode('ab'));
+  $('#terrain-road').addEventListener('click', () => setTerrain('road'));
+  $('#terrain-off').addEventListener('click', () => setTerrain('offroad'));
+  $$('[data-level]').forEach((b) => b.addEventListener('click', () => { S.settings.offLevel = b.dataset.level; saveSettings(S.settings); renderHome(); }));
+  $('#off-share').addEventListener('input', (e) => { S.settings.offShare = +e.target.value; renderOffroadControls(); });
+  $('#off-share').addEventListener('change', () => saveSettings(S.settings));
+  $('#use-tet').addEventListener('change', (e) => { S.settings.useTet = e.target.checked; saveSettings(S.settings); });
+  $('#bike-type-link').addEventListener('click', () => { renderSettings(); renderTastes(); show('screen-settings'); });
+  $('#gpx-input').addEventListener('change', importGpx);
   $('#discovery').addEventListener('input', (e) => { S.settings.discovery = +e.target.value; renderHome(); });
   $('#discovery').addEventListener('change', () => saveSettings(S.settings));
   $('#fuel').addEventListener('change', (e) => { S.settings.fuelKm = Math.max(0, parseFloat(e.target.value) || 0); saveSettings(S.settings); });

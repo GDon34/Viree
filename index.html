@@ -46,6 +46,8 @@
     <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z" fill="currentColor"/></symbol>
     <symbol id="i-star-o" viewBox="0 0 24 24"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></g></symbol>
+    <symbol id="i-track" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21c2-5 6-6 7-10s-1-6 2-8"/><path d="M10 21c1-3 4-4 5-7"/><circle cx="7" cy="8" r="1"/><circle cx="17" cy="17" r="1"/></g></symbol>
+    <symbol id="i-gpx" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c3 0 3-6 6-6s3 6 6 6 2-4 4-4"/><circle cx="4" cy="18" r="1.5"/><path d="M14 4l3 3-3 3"/><path d="M9 7h8"/></g></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
   </defs>
 </svg>
@@ -67,6 +69,11 @@
     <div class="scroll">
       <form class="content" id="home-form" novalidate>
         <h1 id="home-title">Nouvelle sortie</h1>
+
+        <div class="segmented terrain" role="group" aria-label="Terrain">
+          <button type="button" id="terrain-road" aria-pressed="true"><svg aria-hidden="true"><use href="#i-logo"/></svg>Route</button>
+          <button type="button" id="terrain-off" aria-pressed="false"><svg aria-hidden="true"><use href="#i-track"/></svg>Tout-terrain</button>
+        </div>
 
         <div class="segmented" role="group" aria-label="Type de sortie">
           <button type="button" id="mode-loop" aria-pressed="true"><svg aria-hidden="true"><use href="#i-loop"/></svg>Boucle</button>
@@ -128,7 +135,31 @@
           <p class="info-line" id="fast-info"><svg aria-hidden="true"><use href="#i-clock"/></svg><span>Le plus rapide : choisis une arrivée</span></p>
         </section>
 
-        <section class="card">
+        <section class="card off-only" hidden aria-labelledby="level-label">
+          <div class="row-between">
+            <h2 class="label" id="level-label" style="margin:0">Ton niveau</h2>
+            <button type="button" class="btn-link" id="bike-type-link" style="min-height:32px;font-size:14px;align-self:auto"></button>
+          </div>
+          <div class="seg3 levels" role="group" aria-label="Niveau">
+            <button type="button" data-level="beginner">Débutant</button>
+            <button type="button" data-level="intermediate">Intermédiaire</button>
+            <button type="button" data-level="expert">Confirmé</button>
+          </div>
+          <p class="hint" id="level-hint"></p>
+        </section>
+
+        <section class="card off-only" hidden>
+          <div class="row-between">
+            <label class="label" for="off-share">Part de pistes visée</label>
+            <output class="disc-value" id="off-share-out">40 %</output>
+          </div>
+          <input type="range" id="off-share" min="10" max="90" step="5" value="40">
+          <div class="ticks"><span>Surtout route</span><span>Moitié-moitié</span><span>Surtout pistes</span></div>
+          <p class="hint" id="alternate-hint"></p>
+          <label class="check" id="tet-row" hidden><input type="checkbox" id="use-tet"> <span id="tet-label">Passer par le TET</span></label>
+        </section>
+
+        <section class="card road-only">
           <div class="row-between">
             <label class="label" for="discovery">Degré de découverte</label>
             <output class="disc-value" id="discovery-out">60 %</output>
@@ -168,7 +199,30 @@
           <div class="set-list">
             <label class="set-row"><span class="grow">Autonomie avec un plein</span><input class="num-input" type="number" inputmode="numeric" data-setting="fullTankKm" min="50" max="900"><span class="unit">km</span></label>
             <label class="set-row"><span class="grow">Marge de sécurité</span><input class="num-input" type="number" inputmode="numeric" data-setting="safetyKm" min="0" max="200"><span class="unit">km</span></label>
+            <div class="set-row">
+              <span class="grow">Type de moto</span>
+              <div class="seg3 two" role="group" aria-label="Type de moto">
+                <button type="button" data-bike="heavy">Trail lourd</button>
+                <button type="button" data-bike="light">Plus léger</button>
+              </div>
+            </div>
           </div>
+          <p class="hint">Trail lourd : en tout-terrain, l'appli reste un cran en dessous de la difficulté de ton niveau.</p>
+        </section>
+        <section class="set-section">
+          <h2 class="label" style="margin:0">Tout-terrain</h2>
+          <div class="set-list">
+            <div class="set-row">
+              <span class="grow">Légalité des pistes</span>
+              <div class="seg3 two" role="group" aria-label="Légalité">
+                <button type="button" data-legality="standard">Standard</button>
+                <button type="button" data-legality="strict">Stricte</button>
+              </div>
+            </div>
+            <label class="set-row"><span class="grow">Alterner piste et route (refroidissement moteur)</span><input type="checkbox" data-setting="alternate"></label>
+            <label class="set-row"><span class="grow">Section lente max d'affilée</span><input class="num-input" type="number" inputmode="numeric" data-setting="maxSlowMin" min="5" max="120"><span class="unit">min</span></label>
+          </div>
+          <p class="hint">Standard : tout ce qui n'est pas interdit d'après OpenStreetMap, les pistes sans information en orange. Stricte : uniquement les pistes explicitement ouvertes aux motos ou sur le TET. Dans tous les cas, c'est indicatif : la signalisation et les règles régionales ou communales priment.</p>
         </section>
         <section class="set-section">
           <h2 class="label" style="margin:0">Pauses</h2>
@@ -271,6 +325,7 @@
           <p class="stat-line" id="detail-stats"></p>
           <p class="subtitle" id="detail-sub" style="font-size:14px"></p>
           <p class="warn-line" id="detail-warn" hidden></p>
+          <div class="detail-off" id="detail-off" hidden></div>
         </div>
         <div class="btn-row" id="detail-votes">
           <button class="btn-secondary vote-btn" type="button" id="detail-like" aria-pressed="false"><svg aria-hidden="true"><use href="#i-up"/></svg>J'aime</button>
@@ -300,6 +355,7 @@
       </div>
       <p class="man-street" id="man-street"></p>
       <div class="man-next" id="man-next" hidden></div>
+      <div class="off-chip" id="off-chip" hidden></div>
     </section>
     <div class="nav-map">
       <div id="nav-map"></div>
@@ -386,6 +442,12 @@
         <section class="set-section" id="rides-section">
           <h2 class="label" style="margin:0">Sorties</h2>
           <ul class="item-list" id="rides-list"></ul>
+        </section>
+        <section class="set-section" id="traces-section">
+          <div class="row-between"><h2 class="label" style="margin:0">Mes traces GPX (TET…)</h2></div>
+          <label class="btn-secondary" style="cursor:pointer"><svg aria-hidden="true"><use href="#i-gpx"/></svg>Importer un fichier GPX<input type="file" id="gpx-input" accept=".gpx,application/gpx+xml,application/xml,text/xml" multiple hidden></label>
+          <p class="hint">Télécharge les traces du TET sur transeurotrail.org, puis importe-les ici : elles restent sur ton téléphone, et les boucles tout-terrain pourront les emprunter.</p>
+          <ul class="item-list" id="traces-list"></ul>
         </section>
         <section class="set-section" id="liked-section">
           <h2 class="label" style="margin:0">Parcours aimés, à faire</h2>

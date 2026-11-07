@@ -5,7 +5,7 @@ import { encodePolyline, decodePolyline, resample, simplify, cellKey, cumulative
 import { finalizeRoute } from './services.js';
 
 const DB_NAME = 'viree';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 
 function db() {
@@ -17,6 +17,7 @@ function db() {
       const d = req.result;
       if (!d.objectStoreNames.contains('rides')) d.createObjectStore('rides', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('liked')) d.createObjectStore('liked', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('traces')) d.createObjectStore('traces', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -75,6 +76,11 @@ export function packOption(o) {
     withStops: !!o.withStops,
     profile: o.profile || null,
     smallShare: o.smallShare ?? null,
+    terrain: o.terrain || 'road',
+    offroad: o.offroad || null,
+    tetRange: o.tetRange || null,
+    backFirst: !!o.backFirst,
+    traceName: o.traceName || null,
   };
 }
 
@@ -148,6 +154,17 @@ export async function deleteLiked(id) {
 export async function listLiked() {
   try {
     const all = await tx('liked', 'readonly', (s) => reqP(s.getAll()));
+    return (all || []).sort((a, b) => b.date - a.date);
+  } catch { return []; }
+}
+
+// --- Traces GPX importées -------------------------------------------------------------
+
+export async function saveTrace(rec) { return tx('traces', 'readwrite', (s) => s.put(rec)); }
+export async function deleteTrace(id) { return tx('traces', 'readwrite', (s) => s.delete(id)); }
+export async function listTraces() {
+  try {
+    const all = await tx('traces', 'readonly', (s) => reqP(s.getAll()));
     return (all || []).sort((a, b) => b.date - a.date);
   } catch { return []; }
 }

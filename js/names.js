@@ -9,6 +9,9 @@ const VIEWS = ['La route des belvédères', 'Le balcon panoramique', 'La tourné
 const AB_TWISTY = ['Le détour des lacets', 'La traversée sinueuse', 'Le grand détour'];
 const AB_CALM = ['La route buissonnière', 'Le chemin des écoliers', 'La traversée des pâquerettes'];
 const AB_FAST = ['La route directe', 'Le chemin le plus court', 'La ligne droite (ou presque)'];
+const OFF_EASY = ['La piste des écureuils', 'La boucle des cailloux', 'Le chemin des bergers', 'La virée poussiéreuse', 'La piste aux étoiles', 'La balade des ornières'];
+const OFF_HARD = ['Le chemin des contrebandiers', 'La piste des chamois', 'La traversée des crêtes', 'La grimpette des sangliers', 'Les cailloux qui roulent', 'La piste des aventuriers'];
+const OFF_TET = ['L\'échappée TET', 'Le tronçon des voyageurs', 'La boucle transeuropéenne', 'Le raccourci du TET'];
 
 // « du Colle del Lys », « de Sestrières », « du Lago di Avigliana », « de la Bonette »…
 export function withDe(name) {
@@ -40,6 +43,13 @@ function nameCandidates(c, mode, rand, used) {
   const castle = m.sights.find((s) => s.kind === 'castle' && s.name);
   const views = m.sights.filter((s) => s.kind === 'viewpoint').length;
   const options = [];
+  if (c.offroad && c.offroad.checked) {
+    const o = c.offroad;
+    if (o.tet && o.tetKm > 3) options.push(...OFF_TET);
+    if (pass && o.maxGrade >= 3) options.push(`La piste ${withDe(pass.name)}`);
+    options.push(...(o.maxGrade >= 4 ? OFF_HARD : OFF_EASY));
+    return options;
+  }
   if (c.isReference) options.push(...AB_FAST);
   if (pass && m.curvRating >= 3) {
     const de = withDe(pass.name);
@@ -71,6 +81,15 @@ export function assignBadges(list) {
   if (list.length < 2) return;
   const by = (f) => list.slice().sort((a, b) => f(b) - f(a));
   const assign = (c, label, tone) => { if (c && !c.badge) c.badge = { label, tone }; };
+  if (list.some((c) => c.offroad && c.offroad.checked)) {
+    const off = list.filter((c) => c.offroad && c.offroad.checked);
+    const byO = (f) => off.slice().sort((a, b) => f(b) - f(a));
+    assign(byO((c) => c.offroad.tetKm).find((c) => !c.badge && c.offroad.tetKm > 3), 'Sur le TET', 'scenic');
+    assign(byO((c) => c.offroad.share).find((c) => !c.badge), 'Le plus de pistes', 'accent');
+    assign(byO((c) => -c.offroad.longestSlowMin).find((c) => !c.badge), 'Le plus roulant', 'neutral');
+    assign(byO((c) => -c.offroad.maxGrade).find((c) => !c.badge), 'Le plus facile', 'neutral');
+    return;
+  }
   const ref = list.find((c) => c.isReference);
   if (ref) assign(ref, 'Le plus rapide', 'neutral');
   assign(by((c) => c.metrics.degPerKm).find((c) => !c.badge && c.metrics.curvRating >= 3), 'Le plus sinueux', 'accent');

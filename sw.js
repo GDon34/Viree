@@ -1,9 +1,9 @@
 // Service worker : l'appli s'ouvre même sans réseau, et les fonds de carte déjà vus restent en cache.
-const VERSION = 'viree-v4';
+const VERSION = 'viree-v5';
 const APP = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/geo.js', 'js/services.js', 'js/planner.js', 'js/stops.js', 'js/names.js',
-  'js/settings.js', 'js/store.js', 'js/format.js', 'js/map.js', 'js/navigator.js', 'js/voice.js', 'js/gpx.js', 'js/sim.js',
+  'js/settings.js', 'js/store.js', 'js/offroad.js', 'js/traces.js', 'js/format.js', 'js/map.js', 'js/navigator.js', 'js/voice.js', 'js/gpx.js', 'js/sim.js',
   'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css', 'vendor/leaflet-rotate/leaflet-rotate.js',
   'fonts/barlow-latin-400-normal.woff2', 'fonts/barlow-latin-500-normal.woff2', 'fonts/barlow-latin-600-normal.woff2',
   'fonts/barlow-latin-700-normal.woff2', 'fonts/barlow-condensed-latin-600-normal.woff2', 'fonts/barlow-condensed-latin-700-normal.woff2',
@@ -30,7 +30,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
   // Fonds de carte : cache d'abord (utile dans les zones sans réseau).
-  if (url.hostname === 'tile.openstreetmap.org') {
+  if (url.hostname === 'tile.openstreetmap.org' || url.hostname.endsWith('tile.opentopomap.org')) {
     e.respondWith(caches.open(TILE_CACHE).then(async (c) => {
       const hit = await c.match(e.request);
       if (hit) return hit;

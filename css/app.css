@@ -289,6 +289,8 @@ input[type=range] { width: 100%; height: 32px; margin: 0; accent-color: var(--ac
 
 /* Leaflet */
 .map-night .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9) saturate(.5); }
+/* Carte topo la nuit : on assombrit sans inverser, pour garder les courbes de niveau lisibles. */
+.map-night.map-topo .leaflet-tile-pane { filter: brightness(.62) contrast(1.15) saturate(.8); }
 .leaflet-control-attribution { font-size: 10px; }
 .nav .leaflet-control-attribution { background: rgba(28,33,38,.7); color: #A3A9B0; }
 .nav .leaflet-control-attribution a { color: #FB8A3C; }
@@ -360,3 +362,27 @@ article.route-card.leaving { animation: cardOut .25s ease-in forwards; }
 .taste-bar::after { content: ''; position: absolute; left: 50%; top: -3px; width: 2px; height: 14px; background: var(--muted); }
 .taste-bar i { position: absolute; top: 0; height: 8px; border-radius: 4px; }
 .taste span:last-child { font-size: 13px; color: var(--muted); text-align: right; }
+
+/* --- Tout-terrain ------------------------------------------------------------ */
+.segmented.terrain button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+.segmented.terrain button[aria-pressed="true"] svg { stroke: #fff; color: #fff; }
+.seg3.levels { width: 100%; }
+.seg3.levels button { height: 44px; font-size: 15px; }
+.seg3.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.legal-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--seg); width: 100%; }
+.legal-bar i { display: block; height: 6px; }
+.legal-bar .g { background: #2F8F4E; }
+.legal-bar .o { background: #E8900C; }
+.legal-bar .r { background: #B42318; }
+.off-line { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 14px; color: var(--muted); }
+.off-line b { color: var(--ink); font-weight: 600; }
+.legal-legend { display: flex; gap: 12px; font-size: 13px; color: var(--muted); }
+.legal-legend span { display: flex; align-items: center; gap: 5px; }
+.legal-legend i { width: 10px; height: 10px; border-radius: 5px; display: inline-block; }
+.notice { padding: 10px 12px; border-radius: 12px; background: #FFF4E5; color: #7A4300; font-size: 14px; line-height: 1.4; }
+.off-chip { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 12px; background: var(--n-raised); font-size: 15px; font-weight: 600; }
+.off-chip i { width: 10px; height: 10px; border-radius: 5px; flex-shrink: 0; }
+.tl-ico.track { background: #7A5A2E; }
+.detail-off { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.detail-off .legal-bar { height: 8px; }
+.off-chip[hidden] { display: none; }

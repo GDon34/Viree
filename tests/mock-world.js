@@ -1,6 +1,6 @@
 // Monde simulé pour les tests hors ligne : un réseau routier artificiel qui répond
 // comme Valhalla, Overpass et Photon. Chargé seulement avec ?mock=1 (jamais en usage normal).
-import { haversine, bearing, destination, angleDiff, encodePolyline, rng } from '../js/geo.js';
+import { haversine, bearing, destination, angleDiff, encodePolyline, decodePolyline, rng } from '../js/geo.js';
 
 const CENTER = [45.07, 7.40];
 const N = 21;            // nœuds par côté
@@ -78,6 +78,35 @@ export function buildWorld(seed = 42) {
     edges[edges.length - 1].residential = true;
   }
 
+  // Pistes : arêtes « track » reliant des nœuds voisins, avec tags OSM variés.
+  const TRACK_TAGS = () => {
+    const t = { highway: 'track' };
+    const r1 = rand();
+    if (r1 < 0.7) t.tracktype = 'grade' + (1 + Math.floor(rand() * 5));
+    if (rand() < 0.35) t.smoothness = ['good', 'intermediate', 'bad', 'very_bad', 'horrible'][Math.floor(rand() * 5)];
+    if (rand() < 0.4) t.surface = ['gravel', 'compacted', 'dirt', 'ground', 'rock'][Math.floor(rand() * 5)];
+    const r2 = rand();
+    if (r2 < 0.06) t.motor_vehicle = 'agricultural';
+    else if (r2 < 0.10) t.access = 'private';
+    else if (r2 < 0.22) t.motorcycle = 'yes';
+    if (rand() < 0.3) t.name = 'Strada vicinale ' + Math.floor(rand() * 90 + 10);
+    return t;
+  };
+  const gridCount = N * N;
+  for (let gy = 0; gy < N - 1; gy++) for (let gx = 0; gx < N - 1; gx++) {
+    if (rand() > 0.7) continue;
+    const a = gy * N + gx;
+    const b = rand() < 0.5 ? a + N + 1 : a + 1;
+    if (b >= gridCount) continue;
+    addEdge(a, b);
+    const e = edges[edges.length - 1];
+    e.cls = 'track';
+    e.tags = TRACK_TAGS();
+    e.time = e.len / (24 / 3.6);
+    e.name = e.tags.name || '';
+  }
+  for (const e of edges) e.wayId = 100000 + e.id;
+
   // Points d'intérêt.
   let osmId = 1000;
   const interest = [];
@@ -142,6 +171,7 @@ function snap(world, p, filter = null) {
   const noResidential = filter && filter.min_road_class && filter.min_road_class !== 'residential' && filter.min_road_class !== 'service_other';
   for (const e of world.edges) {
     if (noResidential && e.residential) continue;
+    if (e.cls === 'track' && !Number.isFinite(edgeCost(world, e))) continue;
     // pré-filtre grossier
     if (haversine(p, e.pts[Math.floor(e.pts.length / 2)]) > e.len / 2 + 12000) continue;
     for (let i = 0; i < e.pts.length; i++) {
@@ -150,6 +180,22 @@ function snap(world, p, filter = null) {
     }
   }
   return best;
+}
+
+// Coût d'une arête selon le profil demandé (imite Valhalla : pistes pénalisées sauf use_trails élevé,
+// accès privé interdit ; certaines interdictions « agricoles » passent, pour tester notre filtre).
+function edgeCost(world, e) {
+  const prof = world.profile || {};
+  if (e.cls === 'track') {
+    if (e.tags.access === 'private') return Infinity;
+    // Comme Valhalla, la plupart des interdictions sont respectées ; quelques-unes « passent » pour tester notre filtre.
+    if (e.tags.motor_vehicle === 'agricultural' && e.id % 9 !== 0) return Infinity;
+    if (prof.preferTracks || world.forceTracks) return e.time * 0.3;
+    const ut = prof.costing === 'motorcycle' ? (prof.options?.use_trails || 0) : 0;
+    if (ut <= 0) return Infinity;
+    return e.time * (1 + 1.5 * (1 - ut));
+  }
+  return e.time;
 }
 
 function subLen(pts, i0, i1) {
@@ -167,7 +213,7 @@ function shortest(world, s, t, departDir = 0) {
   const mk = (e, fromIdx, toIdx) => {
     const pts = fromIdx <= toIdx ? e.pts.slice(fromIdx, toIdx + 1) : e.pts.slice(toIdx, fromIdx + 1).reverse();
     const len = subLen(pts, 0, pts.length - 1);
-    return { pts, len, time: len * e.time / e.len, name: e.name };
+    return { pts, len, time: len * e.time / e.len, name: e.name, edge: e };
   };
   // departDir : +1 = repartir vers b, -1 = repartir vers a, 0 = libre
   if (departDir <= 0) startArcs.push({ node: se.a, arc: mk(se, s.i, 0) });
@@ -202,10 +248,12 @@ function shortest(world, s, t, departDir = 0) {
     for (const eid of nodes[u].adj) {
       const e = edges[eid];
       const v = e.a === u ? e.b : e.a;
-      const nd = dist[u] + e.time;
+      const c = edgeCost(world, e);
+      if (!Number.isFinite(c)) continue;
+      const nd = dist[u] + c;
       if (nd < dist[v]) {
         dist[v] = nd;
-        prev[v] = { arc: { pts: e.a === u ? e.pts : e.pts.slice().reverse(), len: e.len, time: e.time, name: e.name }, from: u };
+        prev[v] = { arc: { pts: e.a === u ? e.pts : e.pts.slice().reverse(), len: e.len, time: e.time, name: e.name, edge: e }, from: u };
         queue.push(v);
       }
     }
@@ -242,6 +290,7 @@ function arcBearing(pts, fromEnd) {
 
 export function mockRoute(world, req) {
   const locs = req.locations;
+  world.profile = { costing: req.costing, options: req.costing_options?.[req.costing] || {} };
   const snaps = locs.map((l) => snap(world, [l.lat, l.lon], l.search_filter));
   if (snaps.some((s) => !s.e || s.d > 15000)) return { status: 400, body: { error_code: 171, error: 'No suitable edges near location', status_code: 400 } };
   const legs = [];
@@ -267,6 +316,21 @@ export function mockRoute(world, req) {
     if (isBreak) { legs.push(legArcs); legArcs = []; legLocs.push(k + 1); }
   }
   let totalT = 0, totalL = 0;
+  // Registre : tracé complet → voies empruntées (pour une correspondance exacte dans trace_attributes).
+  const fullShape = [];
+  const usedEdges = [];
+  legs.forEach((arcs) => {
+    arcs.forEach((a) => {
+      const startIdx = fullShape.length === 0 ? 0 : 1;
+      let len = 0;
+      for (let i = Math.max(startIdx, 1); i < a.pts.length; i++) len += haversine(a.pts[i - 1], a.pts[i]);
+      for (let i = startIdx; i < a.pts.length; i++) fullShape.push(a.pts[i]);
+      const last = usedEdges[usedEdges.length - 1];
+      if (last && last.edge === a.edge) last.km += len / 1000; else usedEdges.push({ edge: a.edge, km: len / 1000 });
+    });
+  });
+  world.traceRegistry = world.traceRegistry || new Map();
+  world.traceRegistry.set(encodePolyline(fullShape, 6), usedEdges);
   const outLegs = legs.map((arcs) => {
     const shape = [];
     const maneuvers = [];
@@ -286,7 +350,7 @@ export function mockRoute(world, req) {
         const tt = turnType(delta);
         if (tt !== 8 || prevA.name !== a.name) {
           curMan.end_shape_index = startIdx;
-          pushMan(tt, `${TURN_TEXT[tt]} sur la ${a.name}.`, a.name, startIdx);
+          pushMan(tt, a.name ? `${TURN_TEXT[tt]} sur la ${a.name}.` : `${TURN_TEXT[tt]} sur la piste.`, a.name, startIdx);
         }
       }
       for (let i = shape.length === 0 ? 0 : 1; i < a.pts.length; i++) shape.push(a.pts[i]);
@@ -313,23 +377,69 @@ export function mockRoute(world, req) {
   };
 }
 
-// Classes de route le long d'un tracé (imite trace_attributes).
-const CLASS_OF = { main: 'primary', country: 'secondary', twisty: 'tertiary' };
+// Voies le long d'un tracé (imite trace_attributes) : identifiant, classe, revêtement, usage, vitesse.
+const CLASS_OF = { main: 'primary', country: 'secondary', twisty: 'tertiary', track: 'service_other' };
+const SURF_OF = { grade1: 'compacted', grade2: 'compacted', grade3: 'gravel', grade4: 'dirt', grade5: 'path' };
+function edgeAttrs(e, km) {
+  const isTrack = e && e.cls === 'track';
+  const cls = !e ? 'unclassified' : e.residential ? 'residential' : (e.cls === 'country' && e.id % 2 ? 'tertiary' : CLASS_OF[e.cls]);
+  return {
+    way_id: e ? e.wayId : null, road_class: cls, use: isTrack ? 'track' : 'road',
+    surface: isTrack ? (SURF_OF[e.tags.tracktype] || 'gravel') : 'paved_smooth',
+    speed: isTrack ? 30 : e && e.cls === 'main' ? 82 : 60, length: km,
+  };
+}
 function mockTraceAttributes(world, req) {
-  const pts = req.shape.map((p) => [p.lat, p.lon]);
-  const edges = [];
-  for (let i = 1; i < pts.length; i++) {
-    const mid = [(pts[i - 1][0] + pts[i][0]) / 2, (pts[i - 1][1] + pts[i][1]) / 2];
+  if (req.encoded_polyline && world.traceRegistry?.has(req.encoded_polyline)) {
+    return { edges: world.traceRegistry.get(req.encoded_polyline).map((u) => edgeAttrs(u.edge, u.km)), units: 'kilometers' };
+  }
+  const pts = req.encoded_polyline ? decodePolyline(req.encoded_polyline, 6) : req.shape.map((p) => [p.lat, p.lon]);
+  const out = [];
+  let step = Math.max(1, Math.floor(pts.length / 1500));
+  for (let i = step; i < pts.length; i += step) {
+    const a = pts[i - step], b = pts[i];
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     let best = null, bd = Infinity;
+    const prevProfile = world.profile;
+    world.profile = { costing: 'motorcycle', options: { use_trails: 1 } };
     for (const e of world.edges) {
       const c = e.pts[Math.floor(e.pts.length / 2)];
-      if (haversine(mid, c) > e.len / 2 + 2000) continue;
-      for (let k = 0; k < e.pts.length; k += 3) { const d = haversine(mid, e.pts[k]); if (d < bd) { bd = d; best = e; } }
+      if (haversine(mid, c) > e.len / 2 + 1500) continue;
+      // Comme Valhalla, le calage ignore les voies interdites au profil.
+      if (e.cls === 'track' && !Number.isFinite(edgeCost(world, e))) continue;
+      for (let k = 0; k < e.pts.length; k += 2) { const d = haversine(mid, e.pts[k]); if (d < bd) { bd = d; best = e; } }
     }
-    const cls = best ? (best.cls === 'country' && best.id % 2 ? 'tertiary' : CLASS_OF[best.cls]) : 'unclassified';
-    edges.push({ road_class: cls, length: haversine(pts[i - 1], pts[i]) / 1000 });
+    world.profile = prevProfile;
+    const len = haversine(a, b) / 1000;
+    const last = out[out.length - 1];
+    if (last && best && last.way_id === best.wayId) { last.length += len; continue; }
+    const isTrack = best && best.cls === 'track';
+    const cls = !best ? 'unclassified' : best.residential ? 'residential' : (best.cls === 'country' && best.id % 2 ? 'tertiary' : CLASS_OF[best.cls]);
+    out.push({
+      way_id: best ? best.wayId : null,
+      road_class: cls,
+      use: isTrack ? 'track' : 'road',
+      surface: isTrack ? (SURF_OF[best.tags.tracktype] || 'gravel') : 'paved_smooth',
+      speed: isTrack ? 30 : best && best.cls === 'main' ? 82 : 60,
+      length: len,
+    });
   }
-  return { edges, units: 'kilometers' };
+  return { edges: out, units: 'kilometers' };
+}
+
+// Trace GPX « TET » simulée : un long chemin qui emprunte surtout des pistes.
+export function mockTetGpx(world) {
+  const prevProfile = world.profile;
+  world.profile = { costing: 'motorcycle', options: { use_trails: 1 }, preferTracks: true };
+  const way = [world.places[0].p, world.places[2].p, world.places[3].p, world.places[4].p];
+  const pts = [];
+  for (let k = 0; k < way.length - 1; k++) {
+    const arcs = shortest(world, snap(world, way[k]), snap(world, way[k + 1]));
+    for (const a of arcs || []) for (const p of a.pts) pts.push(p);
+  }
+  world.profile = prevProfile;
+  const trk = pts.map(([la, lo]) => `<trkpt lat="${la.toFixed(6)}" lon="${lo.toFixed(6)}"/>`).join('');
+  return `<?xml version="1.0"?><gpx version="1.1" creator="mock"><trk><name>TET Italia (simulé)</name><trkseg>${trk}</trkseg></trk></gpx>`;
 }
 
 // --- Interception de fetch ---------------------------------------------------
@@ -346,6 +456,21 @@ export function installMock(target = globalThis, { seed = 42, latency = 60, log 
     const url = typeof input === 'string' ? input : input.url;
     const wait = () => new Promise((r) => setTimeout(r, latency * (0.5 + Math.random())));
     if (init.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (url.startsWith('https://valhalla1.openstreetmap.de/trace_route')) {
+      stats.valhalla++;
+      await wait();
+      const req = JSON.parse(String(init.body));
+      // Calage de la trace : itinéraire par un point tous les ~600 m, en collant aux pistes (comme map_snap).
+      const pts = req.shape.map((p) => [p.lat, p.lon]);
+      const locs = [{ lat: pts[0][0], lon: pts[0][1] }];
+      let acc = 0;
+      for (let i = 1; i < pts.length - 1; i++) { acc += haversine(pts[i - 1], pts[i]); if (acc > 600) { locs.push({ lat: pts[i][0], lon: pts[i][1], type: 'through' }); acc = 0; } }
+      locs.push({ lat: pts[pts.length - 1][0], lon: pts[pts.length - 1][1] });
+      world.forceTracks = true;
+      const res = mockRoute(world, { locations: locs, costing: 'motorcycle', costing_options: { motorcycle: { use_trails: 1 } } });
+      world.forceTracks = false;
+      return json(res.body, res.status);
+    }
     if (url.startsWith('https://valhalla1.openstreetmap.de/trace_attributes')) {
       stats.valhalla++;
       await wait();
@@ -369,6 +494,15 @@ export function installMock(target = globalThis, { seed = 42, latency = 60, log 
       const body = decodeURIComponent(String(init.body || '').replace(/^data=/, ''));
       // Comme le vrai Overpass : « out tags » ne renvoie pas les coordonnées des nœuds.
       const strip = (els) => (/out\s+tags/.test(body) ? els.map(({ lat, lon, ...rest }) => rest) : els);
+      const ids = /way\(id:([0-9,]+)\)/.exec(body);
+      if (ids) {
+        const want = new Set(ids[1].split(',').map(Number));
+        return json({ elements: world.edges.filter((e) => want.has(e.wayId)).map((e) => ({ type: 'way', id: e.wayId, tags: e.tags || { highway: e.cls === 'main' ? 'primary' : e.cls === 'country' ? 'secondary' : 'tertiary' } })) });
+      }
+      if (body.includes('"highway"="track"')) {
+        return json({ elements: world.edges.filter((e) => e.cls === 'track' && e.tags.access !== 'private' && e.tags.motor_vehicle !== 'agricultural')
+          .map((e) => { const c = e.pts[Math.floor(e.pts.length / 2)]; return { type: 'way', id: e.wayId, center: { lat: c[0], lon: c[1] }, tags: e.tags }; }) });
+      }
       if (body.includes('mountain_pass')) return json({ elements: strip(world.interest) });
       if (body.includes('amenity')) return json({ elements: strip(world.stopsPois) });
       return json({ elements: [] });

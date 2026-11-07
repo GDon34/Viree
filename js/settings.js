@@ -11,6 +11,15 @@ export const DEFAULTS = {
   voice: true,
   theme: 'auto',
   smallRoads: true,
+  // Tout-terrain
+  bikeType: 'heavy',          // 'heavy' (trail lourd) | 'light' (plus léger, enduro)
+  offLegality: 'standard',    // 'standard' | 'strict'
+  alternate: true,            // alterner piste et route (refroidissement)
+  maxSlowMin: 20,             // section lente max d'affilée (min)
+  terrain: 'road',            // dernier choix sur l'accueil
+  offLevel: 'intermediate',
+  offShare: 40,
+  useTet: true,
   // Dernières saisies
   mode: 'loop',
   durationMin: 180,
